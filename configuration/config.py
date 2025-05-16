@@ -14,106 +14,103 @@ Contain the application's configuration including the scenario configurations.
 
 The configuration is run when starting the Orchestrator.
 """
-# configuration/config.py
-from pathlib import Path
 
-from taipy import Config
-from taipy.core.config import Scope  # explicit import keeps linters happy
+from taipy import Config, Scope
 
-
-# ###########################################################################
-# PLACEHOLDER: Put your application's configurations here                   #
-#                                                                           #
-# Example:                                                                  #
-# scenario_config = Config.configure_scenario("placeholder_scenario", [])   #
-#                                                                           #
-# Or create a config.toml file and load it like this:                       #
-# def configure():                                                          #
-#    Config.load("config/config.toml")                                      #
-#    return Config.scenarios["scenario_configuration"]                      #
-#                                                                           #
-# Comment, remove or replace the previous lines with your own use case      #
-# ###########################################################################
-
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "olist.db"
-
-orders_raw_dn_cfg = Config.configure_sql_data_node(
+# 1. Raw orders with cancellation filter
+Config.configure_data_node(
     id="orders_raw_dn",
-    db_engine="sqlite",
-    db_name=str(DB_PATH),
-    read_query="SELECT * FROM olist_order_items_dataset",  # adjust to real table
+    storage_type="sql",
     scope=Scope.GLOBAL,
-    cacheable=True,         # expensive to read; cache once
+    default_path="data/olist.db",
+    read_query="""
+        SELECT
+            oi.order_id,
+            o.order_purchase_timestamp AS ts,
+            oi.product_id,
+            oi.price,
+            oi.freight_value
+        FROM olist_order_items_dataset oi
+        JOIN olist_orders_dataset o
+          ON oi.order_id = o.order_id
+        WHERE o.order_status <> 'canceled'
+    """,
 )
 
-products_raw_dn_cfg = Config.configure_sql_data_node(
+# 2. Product master attributes
+Config.configure_data_node(
     id="products_raw_dn",
-    db_engine="sqlite",
-    db_name=str(DB_PATH),
-    read_query="SELECT * FROM olist_products_dataset",
+    storage_type="sql",
     scope=Scope.GLOBAL,
-    cacheable=True,
+    default_path="data/olist.db",
+    table_name="olist_products_dataset",
 )
 
-flash_calendar_dn_cfg = Config.configure_data_node(
+# 3. Flash calendar (persisted per scenario)
+Config.configure_data_node(
     id="flash_calendar_dn",
-    storage_type="pickle",   # small Python list/dict → pickle is fine
-    default_data=None,       # will be filled by a Task at first run
+    storage_type="parquet",
     scope=Scope.GLOBAL,
+    default_path="data/output/flash_calendar_{scenario.id}.parquet",
 )
 
-# ----------------------------------------------------------------------
-# 2.  ENGINEERED FEATURES & MODEL  (re-usable across scenarios)
-# ----------------------------------------------------------------------
-features_dn_cfg = Config.configure_data_node(
+# 4. Engineered feature table
+Config.configure_data_node(
     id="features_dn",
-    storage_type="pickle",   # large DataFrame; pickle faster than csv
-    cacheable=True,          # recompute only when upstream changes
-    validity_period="P7D",   # invalidate after 7 days if you rerun project
+    storage_type="parquet",
     scope=Scope.GLOBAL,
+    default_path="data/output/features_{scenario.id}.parquet",
 )
 
-model_dn_cfg = Config.configure_data_node(
+# 5. Trained demand model artifact
+Config.configure_data_node(
     id="model_dn",
-    storage_type="pickle",   # sklearn / xgboost model artifact
+    storage_type="pickle",
     scope=Scope.GLOBAL,
+    default_path="data/output/model_{scenario.id}.pkl",
 )
 
-feature_importance_dn_cfg = Config.configure_data_node(
+# 6. Feature importance scores
+Config.configure_data_node(
     id="feature_importance_dn",
-    storage_type="json",
+    storage_type="parquet",
     scope=Scope.GLOBAL,
+    default_path="data/output/feature_importance_{scenario.id}.parquet",
 )
 
-# ----------------------------------------------------------------------
-# 3.  SCENARIO-SPECIFIC ARTIFACTS  (change with each what-if run)
-# ----------------------------------------------------------------------
-price_grid_dn_cfg = Config.configure_data_node(
+# 7. Candidate price grid (in-memory)
+Config.configure_data_node(
     id="price_grid_dn",
     storage_type="in_memory",
-    scope=Scope.SCENARIO,
+    scope=Scope.GLOBAL,
 )
 
-pred_units_dn_cfg = Config.configure_data_node(
+# 8. Predicted units per price (in-memory)
+Config.configure_data_node(
     id="pred_units_dn",
     storage_type="in_memory",
-    scope=Scope.SCENARIO,
+    scope=Scope.GLOBAL,
 )
 
-profit_surface_dn_cfg = Config.configure_data_node(
+# 9. Recommended price & profit results
+Config.configure_data_node(
+    id="rec_price_dn",
+    storage_type="parquet",
+    scope=Scope.GLOBAL,
+    default_path="data/output/rec_price_{scenario.id}.parquet",
+)
+
+# 10. Profit surface lattice (in-memory)
+Config.configure_data_node(
     id="profit_surface_dn",
     storage_type="in_memory",
-    scope=Scope.SCENARIO,
+    scope=Scope.GLOBAL,
 )
 
-rec_price_dn_cfg = Config.configure_data_node(
-    id="rec_price_dn",
-    storage_type="pickle",   # keep for audit / comparison
-    scope=Scope.SCENARIO,
-)
-
-kpi_dn_cfg = Config.configure_data_node(
+# 11. KPI snapshot (persisted per scenario)
+Config.configure_data_node(
     id="kpi_dn",
-    storage_type="json",
-    scope=Scope.SCENARIO,
+    storage_type="parquet",
+    scope=Scope.GLOBAL,
+    default_path="data/output/kpi_{scenario.id}.parquet",
 )
