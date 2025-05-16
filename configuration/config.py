@@ -137,3 +137,66 @@ feature_importance_dn = Config.configure_data_node(
     scope=Scope.SCENARIO,
     storage_type="parquet"
 )
+
+# === Task Configurations ===
+
+# Load raw orders and products
+load_orders_task = Config.configure_task(
+    id="load_orders_task",
+    function="algorithms.algorithms.load_orders",
+    output=["orders_raw_dn"]
+)
+
+load_products_task = Config.configure_task(
+    id="load_products_task",
+    function="algorithms.algorithms.load_products",
+    output=["products_raw_dn"]
+)
+
+# Feature engineering: tag flash windows & build features
+engineer_features_task = Config.configure_task(
+    id="engineer_features_task",
+    function="algorithms.algorithms.engineer_features",
+    input=["orders_raw_dn", "products_raw_dn", "flash_calendar_dn"],
+    output=["features_dn"]
+)
+
+# Train demand model and extract feature importance
+train_demand_model_task = Config.configure_task(
+    id="train_demand_model_task",
+    function="algorithms.algorithms.train_demand_model",
+    input=["features_dn"],
+    output=["model_dn", "feature_importance_dn"]
+)
+
+# Predict units sold for each price grid
+predict_units_task = Config.configure_task(
+    id="predict_units_task",
+    function="algorithms.algorithms.predict_units",
+    input=["model_dn", "price_grid_dn", "features_dn"],
+    output=["pred_units_dn"]
+)
+
+# Optimize prices given predicted units and cost
+optimize_price_task = Config.configure_task(
+    id="optimize_price_task",
+    function="algorithms.algorithms.optimize_price",
+    input=["pred_units_dn", "features_dn"],
+    output=["rec_price_dn", "profit_surface_dn"]
+)
+
+# Evaluate flash day performance against historical
+evaluate_flash_day_task = Config.configure_task(
+    id="evaluate_flash_day_task",
+    function="algorithms.algorithms.evaluate_flash_day",
+    input=["rec_price_dn", "orders_raw_dn"],
+    output=["kpi_dn"]
+)
+
+# Generate elasticity insights (optional)
+plot_elasticity_task = Config.configure_task(
+    id="plot_elasticity_task",
+    function="algorithms.algorithms.plot_elasticity",
+    input=["model_dn"],
+    output=["feature_importance_dn"]
+)
