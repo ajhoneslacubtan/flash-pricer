@@ -1,0 +1,194 @@
+[TAIPY]
+
+[DATA_NODE.seller_id_dn]
+storage_type = "in_memory"
+scope = "GLOBAL:SCOPE"
+default_data = "6560211a19b47992c3666cc44a7e94c0"
+
+[DATA_NODE.orders_raw_dn]
+storage_type = "sql"
+scope = "GLOBAL:SCOPE"
+db_name = "olist"
+db_engine = "sqlite"
+read_query = "\n        SELECT\n            oi.order_id,\n            o.order_purchase_timestamp AS ts,\n            oi.product_id,\n            oi.seller_id,\n            oi.price,\n            oi.freight_value\n        FROM olist_order_items_dataset oi\n        JOIN olist_orders_dataset o \n          ON oi.order_id = o.order_id\n        WHERE o.order_status <> 'canceled';\n    "
+write_query_builder = "configuration.config._no_write:function"
+sqlite_folder_path = "data/"
+
+[DATA_NODE.products_raw_dn]
+storage_type = "sql"
+scope = "GLOBAL:SCOPE"
+db_name = "olist"
+db_engine = "sqlite"
+read_query = "SELECT * FROM olist_products_dataset;"
+write_query_builder = "configuration.config._no_write:function"
+sqlite_folder_path = "data/"
+
+[DATA_NODE.flash_calendar_dn]
+storage_type = "parquet"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.features_dn]
+storage_type = "parquet"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.model_dn]
+storage_type = "pickle"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.feature_importance_dn]
+storage_type = "parquet"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.rec_price_dn]
+storage_type = "parquet"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.kpi_dn]
+storage_type = "parquet"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.price_grid_dn]
+storage_type = "in_memory"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.pred_units_dn]
+storage_type = "in_memory"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.profit_surface_dn]
+storage_type = "in_memory"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.orders_df_dn]
+storage_type = "in_memory"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.products_df_dn]
+storage_type = "in_memory"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.tagged_orders_df_dn]
+storage_type = "in_memory"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.inventory_df_dn]
+storage_type = "in_memory"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.flash_date_dn]
+default_data = "2017-11-24"
+
+[DATA_NODE.synthetic_count_dn]
+default_data = "5:int"
+
+[DATA_NODE.inv_method_dn]
+default_data = "poisson"
+
+[DATA_NODE.price_grid_min_dn]
+default_data = "0.5:float"
+
+[DATA_NODE.price_grid_max_dn]
+default_data = "1.2:float"
+
+[DATA_NODE.price_grid_n_dn]
+default_data = "30:int"
+
+[DATA_NODE.unit_cost_factor_dn]
+default_data = "0.6:float"
+
+[DATA_NODE.marketing_boost_dn]
+default_data = "20:int"
+
+[DATA_NODE.model_type_dn]
+default_data = "xgboost"
+
+[DATA_NODE.objective_dn]
+default_data = "profit"
+
+[TASK.load_orders_task]
+function = "algorithms.algorithms.load_orders:function"
+inputs = [ "orders_raw_dn:SECTION", "seller_id_dn:SECTION",]
+outputs = [ "orders_df_dn:SECTION",]
+skippable = "False:bool"
+
+[TASK.load_products_task]
+function = "algorithms.algorithms.load_products:function"
+inputs = [ "products_raw_dn:SECTION", "orders_df_dn:SECTION",]
+outputs = [ "products_df_dn:SECTION",]
+skippable = "False:bool"
+
+[TASK.generate_flash_calendar_task]
+function = "algorithms.algorithms.generate_flash_calendar:function"
+inputs = [ "flash_date_dn:SECTION", "synthetic_count_dn:SECTION",]
+outputs = [ "flash_calendar_dn:SECTION",]
+skippable = "True:bool"
+
+[TASK.tag_flash_window_task]
+function = "algorithms.algorithms.tag_flash_window:function"
+inputs = [ "orders_df_dn:SECTION", "flash_calendar_dn:SECTION",]
+outputs = [ "tagged_orders_df_dn:SECTION",]
+skippable = "False:bool"
+
+[TASK.simulate_inventory_task]
+function = "algorithms.algorithms.simulate_inventory:function"
+inputs = [ "tagged_orders_df_dn:SECTION", "inv_method_dn:SECTION",]
+outputs = [ "inventory_df_dn:SECTION",]
+skippable = "False:bool"
+
+[TASK.engineer_features_task]
+function = "algorithms.algorithms.engineer_features:function"
+inputs = [ "tagged_orders_df_dn:SECTION", "products_df_dn:SECTION", "inventory_df_dn:SECTION", "marketing_boost_dn:SECTION",]
+outputs = [ "features_dn:SECTION",]
+skippable = "False:bool"
+
+[TASK.train_demand_model_task]
+function = "algorithms.algorithms.train_demand_model:function"
+inputs = [ "features_dn:SECTION", "model_type_dn:SECTION",]
+outputs = [ "model_dn:SECTION", "feature_importance_dn:SECTION",]
+skippable = "False:bool"
+
+[TASK.build_price_grid_task]
+function = "algorithms.algorithms.build_price_grid:function"
+inputs = [ "features_dn:SECTION", "price_grid_min_dn:SECTION", "price_grid_max_dn:SECTION", "price_grid_n_dn:SECTION",]
+outputs = [ "price_grid_dn:SECTION",]
+skippable = "False:bool"
+
+[TASK.predict_units_task]
+function = "algorithms.algorithms.predict_units:function"
+inputs = [ "model_dn:SECTION", "price_grid_dn:SECTION", "features_dn:SECTION",]
+outputs = [ "pred_units_dn:SECTION",]
+skippable = "False:bool"
+
+[TASK.compute_profit_surface_task]
+function = "algorithms.algorithms.compute_profit_surface:function"
+inputs = [ "pred_units_dn:SECTION", "unit_cost_factor_dn:SECTION", "objective_dn:SECTION",]
+outputs = [ "profit_surface_dn:SECTION",]
+skippable = "False:bool"
+
+[TASK.optimize_price_task]
+function = "algorithms.algorithms.optimize_price:function"
+inputs = [ "profit_surface_dn:SECTION", "inventory_df_dn:SECTION",]
+outputs = [ "rec_price_dn:SECTION",]
+skippable = "False:bool"
+
+[TASK.evaluate_flash_day_task]
+function = "algorithms.algorithms.evaluate_flash_day:function"
+inputs = [ "rec_price_dn:SECTION", "features_dn:SECTION",]
+outputs = [ "kpi_dn:SECTION",]
+skippable = "False:bool"
+
+[SCENARIO.flash_pricing_scenario]
+tasks = [ "load_orders_task:SECTION", "load_products_task:SECTION", "generate_flash_calendar_task:SECTION", "tag_flash_window_task:SECTION", "simulate_inventory_task:SECTION", "engineer_features_task:SECTION", "train_demand_model_task:SECTION", "build_price_grid_task:SECTION", "predict_units_task:SECTION", "compute_profit_surface_task:SECTION", "optimize_price_task:SECTION", "evaluate_flash_day_task:SECTION",]
+additional_data_nodes = []
+
+[DATA_NODE.orders_raw_dn.db_extra_args]
+
+[DATA_NODE.products_raw_dn.db_extra_args]
+
+[SCENARIO.flash_pricing_scenario.comparators]
+
+[SCENARIO.flash_pricing_scenario.sequences]
+prep_seq = [ "load_orders_task:SECTION", "load_products_task:SECTION", "generate_flash_calendar_task:SECTION", "tag_flash_window_task:SECTION",]
+train_seq = [ "train_demand_model_task:SECTION",]
+optimize_seq = [ "build_price_grid_task:SECTION", "predict_units_task:SECTION", "compute_profit_surface_task:SECTION", "optimize_price_task:SECTION",]
+kpi_seq = [ "evaluate_flash_day_task:SECTION",]

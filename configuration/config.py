@@ -14,103 +14,244 @@ Contain the application's configuration including the scenario configurations.
 
 The configuration is run when starting the Orchestrator.
 """
-
+from algorithms.algorithms import (
+    load_orders,
+    load_products,
+    generate_flash_calendar,
+    tag_flash_window,
+    simulate_inventory,
+    engineer_features,
+    train_demand_model,
+    build_price_grid,
+    predict_units,
+    compute_profit_surface,
+    optimize_price,
+    evaluate_flash_day,
+)
 from taipy import Config, Scope
 
-# 1. Raw orders with cancellation filter
-Config.configure_data_node(
-    id="orders_raw_dn",
-    storage_type="sql",
+# -------------------------------------------------------------------
+# 1. DataNodeConfigs
+# -------------------------------------------------------------------
+
+# Parameter: which seller’s catalog this scenario controls
+seller_id_dn_cfg = Config.configure_data_node(
+    id="seller_id_dn",
+    storage_type="in_memory",
     scope=Scope.GLOBAL,
-    default_path="data/olist.db",
+    default_data="6560211a19b47992c3666cc44a7e94c0"  # e.g. "6560211a19b47992c3666cc44a7e94c0"
+)
+
+def _no_write(*_, **__):  # read-only helper
+    return None
+
+orders_raw_dn_cfg = Config.configure_sql_data_node(
+    id="orders_raw_dn",
+    db_engine="sqlite",
+    db_name="olist",              # just the filename
+    sqlite_folder_path="data/",   # folder where it lives
+    db_extra_args={},             # ensure no NoneType error
     read_query="""
         SELECT
             oi.order_id,
             o.order_purchase_timestamp AS ts,
             oi.product_id,
+            oi.seller_id,
             oi.price,
             oi.freight_value
         FROM olist_order_items_dataset oi
-        JOIN olist_orders_dataset o
+        JOIN olist_orders_dataset o 
           ON oi.order_id = o.order_id
-        WHERE o.order_status <> 'canceled'
+        WHERE o.order_status <> 'canceled';
     """,
+    write_query_builder=_no_write,
+    scope=Scope.GLOBAL,
 )
 
-# 2. Product master attributes
-Config.configure_data_node(
+
+products_raw_dn_cfg = Config.configure_sql_data_node(
     id="products_raw_dn",
-    storage_type="sql",
-    scope=Scope.GLOBAL,
-    default_path="data/olist.db",
-    table_name="olist_products_dataset",
-)
-
-# 3. Flash calendar (persisted per scenario)
-Config.configure_data_node(
-    id="flash_calendar_dn",
-    storage_type="parquet",
-    scope=Scope.GLOBAL,
-    default_path="data/output/flash_calendar_{scenario.id}.parquet",
-)
-
-# 4. Engineered feature table
-Config.configure_data_node(
-    id="features_dn",
-    storage_type="parquet",
-    scope=Scope.GLOBAL,
-    default_path="data/output/features_{scenario.id}.parquet",
-)
-
-# 5. Trained demand model artifact
-Config.configure_data_node(
-    id="model_dn",
-    storage_type="pickle",
-    scope=Scope.GLOBAL,
-    default_path="data/output/model_{scenario.id}.pkl",
-)
-
-# 6. Feature importance scores
-Config.configure_data_node(
-    id="feature_importance_dn",
-    storage_type="parquet",
-    scope=Scope.GLOBAL,
-    default_path="data/output/feature_importance_{scenario.id}.parquet",
-)
-
-# 7. Candidate price grid (in-memory)
-Config.configure_data_node(
-    id="price_grid_dn",
-    storage_type="in_memory",
+    db_engine="sqlite",
+    db_name="olist",
+    sqlite_folder_path="data/",
+    db_extra_args={},
+    read_query="SELECT * FROM olist_products_dataset;",
+    write_query_builder=_no_write,
     scope=Scope.GLOBAL,
 )
 
-# 8. Predicted units per price (in-memory)
-Config.configure_data_node(
-    id="pred_units_dn",
-    storage_type="in_memory",
-    scope=Scope.GLOBAL,
+# persisted outputs (parquet/pickle)
+flash_calendar_dn_cfg      = Config.configure_data_node(id="flash_calendar_dn",      storage_type="parquet", scope=Scope.GLOBAL)
+features_dn_cfg            = Config.configure_data_node(id="features_dn",            storage_type="parquet", scope=Scope.GLOBAL)
+model_dn_cfg               = Config.configure_data_node(id="model_dn",               storage_type="pickle",  scope=Scope.GLOBAL)
+feature_importance_dn_cfg  = Config.configure_data_node(id="feature_importance_dn",  storage_type="parquet", scope=Scope.GLOBAL)
+rec_price_dn_cfg           = Config.configure_data_node(id="rec_price_dn",           storage_type="parquet", scope=Scope.GLOBAL)
+kpi_dn_cfg                 = Config.configure_data_node(id="kpi_dn",                 storage_type="parquet", scope=Scope.GLOBAL)
+
+# in-memory intermediates
+price_grid_dn_cfg      = Config.configure_data_node(id="price_grid_dn",     storage_type="in_memory", scope=Scope.GLOBAL)
+pred_units_dn_cfg      = Config.configure_data_node(id="pred_units_dn",     storage_type="in_memory", scope=Scope.GLOBAL)
+profit_surface_dn_cfg  = Config.configure_data_node(id="profit_surface_dn", storage_type="in_memory", scope=Scope.GLOBAL)
+
+orders_df_dn_cfg        = Config.configure_data_node(id="orders_df_dn",        storage_type="in_memory", scope=Scope.GLOBAL)
+products_df_dn_cfg      = Config.configure_data_node(id="products_df_dn",      storage_type="in_memory", scope=Scope.GLOBAL)
+tagged_orders_df_dn_cfg = Config.configure_data_node(id="tagged_orders_df_dn", storage_type="in_memory", scope=Scope.GLOBAL)
+inventory_df_dn_cfg     = Config.configure_data_node(id="inventory_df_dn",     storage_type="in_memory", scope=Scope.GLOBAL)
+
+# -------------------------------------------------------------------
+# 3 ▸ Parameter DataNodes (in-memory with defaults)
+# -------------------------------------------------------------------
+flash_date_dn_cfg        = Config.configure_data_node("flash_date_dn",        default_data="2017-11-24")
+synthetic_count_dn_cfg   = Config.configure_data_node("synthetic_count_dn",   default_data=5)
+inv_method_dn_cfg        = Config.configure_data_node("inv_method_dn",        default_data="poisson")
+price_grid_min_dn_cfg    = Config.configure_data_node("price_grid_min_dn",    default_data=0.50)
+price_grid_max_dn_cfg    = Config.configure_data_node("price_grid_max_dn",    default_data=1.20)
+price_grid_n_dn_cfg      = Config.configure_data_node("price_grid_n_dn",      default_data=30)
+unit_cost_factor_dn_cfg  = Config.configure_data_node("unit_cost_factor_dn",  default_data=0.60)
+marketing_boost_dn_cfg   = Config.configure_data_node("marketing_boost_dn",   default_data=20)
+model_type_dn_cfg        = Config.configure_data_node("model_type_dn",        default_data="xgboost")
+objective_dn_cfg         = Config.configure_data_node("objective_dn",         default_data="profit")
+
+# -------------------------------------------------------------------
+# 2. TaskConfigs
+# -------------------------------------------------------------------
+load_orders_task_cfg = Config.configure_task(
+    id="load_orders_task",
+    function=load_orders,
+    input=[orders_raw_dn_cfg, seller_id_dn_cfg],
+    output=orders_df_dn_cfg,
 )
 
-# 9. Recommended price & profit results
-Config.configure_data_node(
-    id="rec_price_dn",
-    storage_type="parquet",
-    scope=Scope.GLOBAL,
-    default_path="data/output/rec_price_{scenario.id}.parquet",
+load_products_task_cfg = Config.configure_task(
+    id="load_products_task",
+    function=load_products,
+    input=[products_raw_dn_cfg, orders_df_dn_cfg],
+    output=products_df_dn_cfg,
 )
 
-# 10. Profit surface lattice (in-memory)
-Config.configure_data_node(
-    id="profit_surface_dn",
-    storage_type="in_memory",
-    scope=Scope.GLOBAL,
+generate_flash_calendar_task_cfg = Config.configure_task(
+    "generate_flash_calendar_task",
+    generate_flash_calendar,
+    input=[flash_date_dn_cfg, synthetic_count_dn_cfg],
+    output=flash_calendar_dn_cfg,
+    skippable=True,
 )
 
-# 11. KPI snapshot (persisted per scenario)
-Config.configure_data_node(
-    id="kpi_dn",
-    storage_type="parquet",
-    scope=Scope.GLOBAL,
-    default_path="data/output/kpi_{scenario.id}.parquet",
+tag_flash_window_task_cfg = Config.configure_task(
+    id="tag_flash_window_task",
+    function=tag_flash_window,
+    input=[orders_df_dn_cfg, flash_calendar_dn_cfg],
+    output=tagged_orders_df_dn_cfg,
 )
+
+simulate_inventory_task_cfg = Config.configure_task(
+    "simulate_inventory_task",
+    simulate_inventory,
+    input=[tagged_orders_df_dn_cfg, inv_method_dn_cfg],
+    output=inventory_df_dn_cfg,
+)
+
+engineer_features_task_cfg = Config.configure_task(
+    "engineer_features_task",
+    engineer_features,
+    input=[
+        tagged_orders_df_dn_cfg,
+        products_df_dn_cfg,
+        inventory_df_dn_cfg,
+        marketing_boost_dn_cfg,
+    ],
+    output=features_dn_cfg,
+)
+
+train_demand_model_task_cfg = Config.configure_task(
+    "train_demand_model_task",
+    train_demand_model,
+    input=[features_dn_cfg, model_type_dn_cfg],
+    output=[model_dn_cfg, feature_importance_dn_cfg],
+)
+
+build_price_grid_task_cfg = Config.configure_task(
+    "build_price_grid_task",
+    build_price_grid,
+    input=[
+        features_dn_cfg,
+        price_grid_min_dn_cfg,
+        price_grid_max_dn_cfg,
+        price_grid_n_dn_cfg,
+    ],
+    output=price_grid_dn_cfg,
+)
+
+predict_units_task_cfg = Config.configure_task(
+    id="predict_units_task",
+    function=predict_units,
+    input=[model_dn_cfg, price_grid_dn_cfg, features_dn_cfg],
+    output=pred_units_dn_cfg,
+)
+
+compute_profit_surface_task_cfg = Config.configure_task(
+    "compute_profit_surface_task",
+    compute_profit_surface,
+    input=[pred_units_dn_cfg, unit_cost_factor_dn_cfg, objective_dn_cfg],
+    output=profit_surface_dn_cfg,
+)
+
+optimize_price_task_cfg = Config.configure_task(
+    id="optimize_price_task",
+    function=optimize_price,
+    input=[profit_surface_dn_cfg, inventory_df_dn_cfg],
+    output=rec_price_dn_cfg,
+)
+
+evaluate_flash_day_task_cfg = Config.configure_task(
+    id="evaluate_flash_day_task",
+    function=evaluate_flash_day,
+    input=[rec_price_dn_cfg, features_dn_cfg],
+    output=kpi_dn_cfg,
+)
+
+# -------------------------------------------------------------------
+# ScenarioConfig (no parameters argument)
+# -------------------------------------------------------------------
+scenario_cfg = Config.configure_scenario(
+    id="flash_pricing_scenario",
+    task_configs=[
+        load_orders_task_cfg,
+        load_products_task_cfg,
+        generate_flash_calendar_task_cfg,
+        tag_flash_window_task_cfg,
+        simulate_inventory_task_cfg,
+        engineer_features_task_cfg,
+        train_demand_model_task_cfg,
+        build_price_grid_task_cfg,
+        predict_units_task_cfg,
+        compute_profit_surface_task_cfg,
+        optimize_price_task_cfg,
+        evaluate_flash_day_task_cfg,
+    ],
+)
+
+# -------------------------------------------------------------------
+# Sequences (prep, train, optimize, kpi)
+# -------------------------------------------------------------------
+scenario_cfg.add_sequences({
+    "prep_seq": [
+        load_orders_task_cfg,
+        load_products_task_cfg,
+        generate_flash_calendar_task_cfg,
+        tag_flash_window_task_cfg,
+        # simulate_inventory_task_cfg,
+        # engineer_features_task_cfg,
+    ],
+    "train_seq": [train_demand_model_task_cfg],
+    "optimize_seq": [
+        build_price_grid_task_cfg,
+        predict_units_task_cfg,
+        compute_profit_surface_task_cfg,
+        optimize_price_task_cfg,
+    ],
+    "kpi_seq": [evaluate_flash_day_task_cfg],
+})
+
+
+Config.export("configuration/config.toml")
