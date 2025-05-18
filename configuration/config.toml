@@ -82,7 +82,7 @@ default_data = "2017-11-24"
 default_data = "5:int"
 
 [DATA_NODE.inv_method_dn]
-default_data = "poisson"
+scope = "GLOBAL:SCOPE"
 
 [DATA_NODE.price_grid_min_dn]
 default_data = "0.5:float"
@@ -185,10 +185,21 @@ additional_data_nodes = []
 
 [DATA_NODE.products_raw_dn.db_extra_args]
 
+[DATA_NODE.inv_method_dn.default_data]
+method = "sQ"
+s = "20:int"
+Q = "100:int"
+initial_inventory = "50:int"
+
 [SCENARIO.flash_pricing_scenario.comparators]
 
 [SCENARIO.flash_pricing_scenario.sequences]
-prep_seq = [ "load_orders_task:SECTION", "load_products_task:SECTION", "generate_flash_calendar_task:SECTION", "tag_flash_window_task:SECTION",]
+prep_seq = [ "load_orders_task:SECTION", "load_products_task:SECTION", "generate_flash_calendar_task:SECTION", "tag_flash_window_task:SECTION", "simulate_inventory_task:SECTION",]
 train_seq = [ "train_demand_model_task:SECTION",]
 optimize_seq = [ "build_price_grid_task:SECTION", "predict_units_task:SECTION", "compute_profit_surface_task:SECTION", "optimize_price_task:SECTION",]
 kpi_seq = [ "evaluate_flash_day_task:SECTION",]
+
+[DATA_NODE.inv_method_dn.default_data.lead_time]
+type = "uniform_int"
+low = "2:int"
+high = "5:int"

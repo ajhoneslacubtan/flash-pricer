@@ -14,6 +14,7 @@ Contain the application's configuration including the scenario configurations.
 
 The configuration is run when starting the Orchestrator.
 """
+import numpy as np
 from algorithms.algorithms import (
     load_orders,
     load_products,
@@ -44,6 +45,10 @@ seller_id_dn_cfg = Config.configure_data_node(
 
 def _no_write(*_, **__):  # read-only helper
     return None
+
+def sample_lead_time():
+    # e.g. uniform integer from 2 to 5 days
+    return np.random.randint(2, 6)
 
 orders_raw_dn_cfg = Config.configure_sql_data_node(
     id="orders_raw_dn",
@@ -103,7 +108,21 @@ inventory_df_dn_cfg     = Config.configure_data_node(id="inventory_df_dn",     s
 # -------------------------------------------------------------------
 flash_date_dn_cfg        = Config.configure_data_node("flash_date_dn",        default_data="2017-11-24")
 synthetic_count_dn_cfg   = Config.configure_data_node("synthetic_count_dn",   default_data=5)
-inv_method_dn_cfg        = Config.configure_data_node("inv_method_dn",        default_data="poisson")
+inv_method_dn_cfg        = Config.configure_data_node(
+                                id="inv_method_dn",
+                                default_data={
+                                    # --- reorder policy ------------------------------------
+                                    "method": "sQ",           # or "RS"
+                                    "s"     : 20,             # reorder point
+                                    "Q"     : 100,            # order quantity
+                                    # "R": 7, "S": 300        # <- fields for an (R,S) policy
+                                    # -------------------------------------------------------
+                                    "initial_inventory": 50,
+                                    # JSON description of the lead-time sampler
+                                    "lead_time": {"type": "uniform_int", "low": 2, "high": 5}
+                                },
+                                scope=Scope.GLOBAL          # GLOBAL so every task can read it
+                            )
 price_grid_min_dn_cfg    = Config.configure_data_node("price_grid_min_dn",    default_data=0.50)
 price_grid_max_dn_cfg    = Config.configure_data_node("price_grid_max_dn",    default_data=1.20)
 price_grid_n_dn_cfg      = Config.configure_data_node("price_grid_n_dn",      default_data=30)
@@ -240,7 +259,7 @@ scenario_cfg.add_sequences({
         load_products_task_cfg,
         generate_flash_calendar_task_cfg,
         tag_flash_window_task_cfg,
-        # simulate_inventory_task_cfg,
+        simulate_inventory_task_cfg,
         # engineer_features_task_cfg,
     ],
     "train_seq": [train_demand_model_task_cfg],

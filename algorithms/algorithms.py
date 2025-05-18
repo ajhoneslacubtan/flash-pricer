@@ -15,21 +15,18 @@ This file is designed to contain the various Python functions used to configure 
 The functions will be imported by the __init__.py file in this folder.
 """
 from __future__ import annotations
-
-import datetime as dt
-import importlib
-from typing import List, Optional
+from collections import defaultdict
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
-from dateutil.relativedelta import relativedelta
 from datetime import datetime, timedelta
 import random
+
 import holidays
-
 from xgboost import XGBRegressor
-
-
+from algorithms.inventory_policy import InventoryMethod
+from numba import njit, prange
 
 
 # ──────────────────────────────
@@ -229,69 +226,171 @@ def tag_flash_window(
     for _, row in flash_calendar_df.iterrows():
         mask = (df["ts"] >= row["start_ts"]) & (df["ts"] <= row["end_ts"])
         df.loc[mask, "flash_flag"] = True
-    return df
+    return df.reset_index(drop=True)
 
 
 # ------------------------------------------------------------------
 # 4 ▸ Inventory simulation
 # ------------------------------------------------------------------
-def simulate_inventory(
-    tagged_orders_df_dn: pd.DataFrame,
-    inv_method: str = "poisson",
-    **_kwargs,
-) -> pd.DataFrame:
-    """
-    Produce a per-SKU, per-day inventory table.
-    Modes:
-      • poisson – start_stock ~ Poisson(lambda = mean_daily_sales * 1.5)
-      • custom_function – calls custom_inventory.simulate_inventory(df)
-    """
+
+def _dict_to_policy(d: dict) -> InventoryMethod:
+    lt = d.pop("lead_time")
+    if lt["type"] != "uniform_int":
+        raise ValueError("Only 'uniform_int' lead-time supported in fast path.")
+    return InventoryMethod(**d,
+                           lead_time_low = lt["low"],
+                           lead_time_high= lt["high"])
+
+@njit(parallel=True, cache=True)
+def _simulate_sQ(demand, s, Q, initial_inv, lt_low, lt_high):
+    n_days, n_sku = demand.shape
+    on_hand_out = np.empty_like(demand)
+
+    # run each SKU independently ⇒ safe to parallelise
+    for k in prange(n_sku):
+        inv      = initial_inv
+        pending  = 0                       # pipeline not yet received
+        max_lt   = lt_high
+        pipeline = np.zeros(n_days + max_lt + 1, dtype=np.int64)
+
+        for t in range(n_days):
+            # (1) receive
+            inv     += pipeline[t]
+            pending -= pipeline[t]
+
+            # (2) ship demand
+            d   = demand[t, k]
+            sh  = d if inv >= d else inv
+            inv -= sh
+            on_hand_out[t, k] = inv
+
+            # (3) reorder if needed
+            if inv <= s:
+                lt = np.random.randint(lt_low, lt_high + 1)
+                arrive = t + lt
+                pipeline[arrive] += Q
+                pending += Q
+    return on_hand_out
+
+@njit(parallel=True, cache=True)
+def _simulate_RS(demand, R, S, initial_inv, lt_low, lt_high):
+    n_days, n_sku = demand.shape
+    on_hand_out = np.empty_like(demand)
+
+    for k in prange(n_sku):
+        inv      = initial_inv
+        pending  = 0
+        max_lt   = lt_high
+        pipeline = np.zeros(n_days + max_lt + 1, dtype=np.int64)
+
+        for t in range(n_days):
+            # (1) receive arrivals
+            inv     += pipeline[t]
+            pending -= pipeline[t]
+
+            # (2) ship demand
+            d   = demand[t, k]
+            sh  = d if inv >= d else inv
+            inv -= sh
+            on_hand_out[t, k] = inv
+
+            # (3) review every R days (t=0, R, 2R, …)
+            if (t % R) == 0:
+                need = S - (inv + pending)
+                if need > 0:
+                    lt = np.random.randint(lt_low, lt_high + 1)
+                    arrive = t + lt
+                    pipeline[arrive] += need
+                    pending += need
+    return on_hand_out
+
+
+def simulate_inventory(tagged_orders_df_dn: pd.DataFrame,
+                       inv_method_dict: dict) -> pd.DataFrame:
+
+    # ------------------------------------------------------------------
+    # 1 ▸ rebuild InventoryMethod from Taipy JSON-dict
+    # ------------------------------------------------------------------
+    policy = _dict_to_policy(inv_method_dict.copy())
+
+    # ------------------------------------------------------------------
+    # 2 ▸ pandas: daily aggregation & full calendar
+    # ------------------------------------------------------------------
     df = tagged_orders_df_dn.copy()
-    df["date"] = df["ts"].dt.floor("D")
-
-    if inv_method == "custom_function":
-        try:
-            custom_mod = importlib.import_module("custom_inventory")
-            return custom_mod.simulate_inventory(df)
-        except ModuleNotFoundError as exc:
-            raise RuntimeError("custom_inventory module not found") from exc
-
-    # Basic Poisson simulation:
-    daily_sales = (
-        df.groupby(["product_id", "date"])
-          .size()
-          .rename("units_sold")
+    df['date'] = pd.to_datetime(df['ts']).dt.floor('D')
+    daily = (
+        df.groupby(['product_id', 'date'])
+          .agg(
+              demand        = ('date', 'size'),
+              price         = ('price', 'mean'),
+              freight_value = ('freight_value', 'mean'),
+              flash_flag    = ('flash_flag', 'max')
+          )
           .reset_index()
     )
-    mean_sales = (
-        daily_sales.groupby("product_id")["units_sold"]
-                   .mean()
-                   .rename("mu")
-                   .reset_index()
+
+    start, end  = daily['date'].min(), daily['date'].max()
+    all_dates   = pd.date_range(start, end, freq='D')
+    skus        = daily['product_id'].unique()
+
+    # full grid → ensure zero-demand days are present
+    full = (
+        pd.MultiIndex.from_product([skus, all_dates],
+                                   names=['product_id', 'date'])
+          .to_frame(index=False)
+          .merge(daily, on=['product_id', 'date'], how='left')
+          .fillna({'demand': 0,
+                   'flash_flag': False,
+                   'price': np.nan,
+                   'freight_value': np.nan})
     )
-    rng = np.random.default_rng(123)
-    mean_sales["start_stock"] = mean_sales["mu"].apply(
-        lambda mu: max(300, rng.poisson(mu * 1.5))
-    )
 
-    inv_records: List[dict] = []
-    for _, row in mean_sales.iterrows():
-        sku = row["product_id"]
-        stock = int(row["start_stock"])
-        sku_sales = daily_sales[
-            daily_sales["product_id"] == sku
-        ].sort_values("date")
-        for _, sale_row in sku_sales.iterrows():
-            inv_records.append({
-                "product_id": sku,
-                "date": sale_row["date"],
-                "inventory": stock,
-            })
-            stock = max(stock - int(sale_row["units_sold"]), 0)
+    # ------------------------------------------------------------------
+    # 3 ▸ build per-SKU empirical demand pools & sample
+    # ------------------------------------------------------------------
+    n_days, n_sku = len(all_dates), len(skus)
+    demand_mat = np.zeros((n_days, n_sku), dtype=np.int64)
 
-    inv_df = pd.DataFrame(inv_records)
-    return inv_df
+    for idx, sku in enumerate(skus):
+        hist_flash  = full[(full.product_id == sku) & (full.flash_flag)].demand.values
+        hist_normal = full[(full.product_id == sku) & (~full.flash_flag)].demand.values
+        if hist_flash.size == 0:   hist_flash  = hist_normal
+        if hist_normal.size == 0:  hist_normal = np.array([0])
 
+        sku_rows = full.product_id == sku
+        for t, day in enumerate(all_dates):
+            is_flash = full.loc[sku_rows & (full.date == day), 'flash_flag'].iat[0]
+            demand_mat[t, idx] = np.random.choice(hist_flash if is_flash else hist_normal)
+
+    # ------------------------------------------------------------------
+    # 4 ▸ Numba core
+    # ------------------------------------------------------------------
+    if policy.method == "sQ":
+        on_hand = _simulate_sQ(demand_mat,
+                               s = policy.s, Q = policy.Q,
+                               initial_inv = policy.initial_inventory,
+                               lt_low = policy.lead_time_low,
+                               lt_high= policy.lead_time_high)
+    elif policy.method == "RS":
+        on_hand = _simulate_RS(demand_mat,
+                               R = policy.R, S = policy.S,
+                               initial_inv = policy.initial_inventory,
+                               lt_low = policy.lead_time_low,
+                               lt_high= policy.lead_time_high)
+    else:
+        raise ValueError("Unknown policy method: " + policy.method)
+
+    # ------------------------------------------------------------------
+    # 5 ▸ tidy DataFrame back for ML / reporting
+    # ------------------------------------------------------------------
+    out = full[['product_id', 'date',
+                'price', 'freight_value', 'flash_flag']].copy()
+    # after merge, rows are ordered by product_id then date ⟶ we need the same order
+    out = out.sort_values(['date', 'product_id']).reset_index(drop=True)
+    out['on_hand'] = on_hand.ravel(order='F')    # Fortran order: date‐major
+    out['demand']  = demand_mat.ravel(order='F')
+
+    return out.reset_index(drop=True)
 
 # ------------------------------------------------------------------
 # 5 ▸ Feature engineering
