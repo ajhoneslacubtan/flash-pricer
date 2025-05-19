@@ -27,6 +27,22 @@ sqlite_folder_path = "data/"
 storage_type = "parquet"
 scope = "GLOBAL:SCOPE"
 
+[DATA_NODE.freight_median_by_cat_dn]
+storage_type = "parquet"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.global_freight_median_dn]
+storage_type = "pickle"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.top_categories_dn]
+storage_type = "pickle"
+scope = "GLOBAL:SCOPE"
+
+[DATA_NODE.sku_encoder_dn]
+storage_type = "pickle"
+scope = "GLOBAL:SCOPE"
+
 [DATA_NODE.features_dn]
 storage_type = "parquet"
 scope = "GLOBAL:SCOPE"
@@ -135,11 +151,17 @@ inputs = [ "tagged_orders_df_dn:SECTION", "inv_method_dn:SECTION",]
 outputs = [ "inventory_df_dn:SECTION",]
 skippable = "True:bool"
 
-[TASK.engineer_features_task]
-function = "algorithms.algorithms.engineer_features:function"
-inputs = [ "products_df_dn:SECTION", "inventory_df_dn:SECTION", "marketing_boost_dn:SECTION",]
-outputs = [ "features_dn:SECTION",]
+[TASK.fit_feature_artifacts_task]
+function = "algorithms.algorithms.fit_feature_artifacts:function"
+inputs = [ "inventory_df_dn:SECTION", "products_df_dn:SECTION",]
+outputs = [ "freight_median_by_cat_dn:SECTION", "global_freight_median_dn:SECTION", "top_categories_dn:SECTION", "sku_encoder_dn:SECTION",]
 skippable = "True:bool"
+
+[TASK.transform_features_task]
+function = "algorithms.algorithms.transform_features:function"
+inputs = [ "inventory_df_dn:SECTION", "products_df_dn:SECTION", "freight_median_by_cat_dn:SECTION", "global_freight_median_dn:SECTION", "top_categories_dn:SECTION", "sku_encoder_dn:SECTION", "marketing_boost_dn:SECTION",]
+outputs = [ "features_dn:SECTION",]
+skippable = "False:bool"
 
 [TASK.train_demand_model_task]
 function = "algorithms.algorithms.train_demand_model:function"
@@ -178,7 +200,7 @@ outputs = [ "kpi_dn:SECTION",]
 skippable = "False:bool"
 
 [SCENARIO.flash_pricing_scenario]
-tasks = [ "load_orders_task:SECTION", "load_products_task:SECTION", "generate_flash_calendar_task:SECTION", "tag_flash_window_task:SECTION", "simulate_inventory_task:SECTION", "engineer_features_task:SECTION", "train_demand_model_task:SECTION", "build_price_grid_task:SECTION", "predict_units_task:SECTION", "compute_profit_surface_task:SECTION", "optimize_price_task:SECTION", "evaluate_flash_day_task:SECTION",]
+tasks = [ "load_orders_task:SECTION", "load_products_task:SECTION", "generate_flash_calendar_task:SECTION", "tag_flash_window_task:SECTION", "simulate_inventory_task:SECTION", "fit_feature_artifacts_task:SECTION", "transform_features_task:SECTION", "train_demand_model_task:SECTION", "build_price_grid_task:SECTION", "predict_units_task:SECTION", "compute_profit_surface_task:SECTION", "optimize_price_task:SECTION", "evaluate_flash_day_task:SECTION",]
 additional_data_nodes = []
 
 [DATA_NODE.orders_raw_dn.db_extra_args]
@@ -194,7 +216,7 @@ initial_inventory = "50:int"
 [SCENARIO.flash_pricing_scenario.comparators]
 
 [SCENARIO.flash_pricing_scenario.sequences]
-prep_seq = [ "load_orders_task:SECTION", "load_products_task:SECTION", "generate_flash_calendar_task:SECTION", "tag_flash_window_task:SECTION", "simulate_inventory_task:SECTION", "engineer_features_task:SECTION",]
+prep_seq = [ "load_orders_task:SECTION", "load_products_task:SECTION", "generate_flash_calendar_task:SECTION", "tag_flash_window_task:SECTION", "simulate_inventory_task:SECTION", "fit_feature_artifacts_task:SECTION", "transform_features_task:SECTION",]
 train_seq = [ "train_demand_model_task:SECTION",]
 optimize_seq = [ "build_price_grid_task:SECTION", "predict_units_task:SECTION", "compute_profit_surface_task:SECTION", "optimize_price_task:SECTION",]
 kpi_seq = [ "evaluate_flash_day_task:SECTION",]

@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 import random
 
 import holidays
+from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBRegressor
 from algorithms.inventory_policy import InventoryMethod
 from numba import njit, prange
@@ -396,66 +397,100 @@ def simulate_inventory(tagged_orders_df_dn: pd.DataFrame,
 # 5 ▸ Feature engineering
 # ------------------------------------------------------------------
 
-def engineer_features(
-    products_df: pd.DataFrame,
+def fit_feature_artifacts(
     inventory_df: pd.DataFrame,
+    products_df: pd.DataFrame,
+) -> tuple[pd.Series, float, list[str], LabelEncoder]:
+    """
+    Compute and persist FE artifacts:
+      - freight median by category
+      - global freight median
+      - top-N categories
+      - SKU LabelEncoder
+    """
+    # Merge to get category
+    merged = inventory_df.merge(
+        products_df[['product_id','category_name']],
+        on='product_id', how='left'
+    )
+    # Freight medians by category
+    freight_median_by_cat = (
+        merged.groupby('category_name')['freight_value']
+              .median()
+    )
+    # Global freight median
+    global_freight_median = float(merged['freight_value'].median())
+
+    # Top-N categories
+    top_categories = (
+        products_df['category_name']
+                   .value_counts()
+                   .nlargest(10)
+                   .index
+                   .tolist()
+    )
+
+    # SKU encoder
+    encoder = LabelEncoder()
+    encoder.fit(inventory_df['product_id'])
+
+    return freight_median_by_cat, global_freight_median, top_categories, encoder
+
+
+def transform_features(
+    inventory_df: pd.DataFrame,
+    products_df: pd.DataFrame,
+    freight_median_by_cat: pd.Series,
+    global_freight_median: float,
+    top_categories: list[str],
+    sku_encoder: LabelEncoder,
     marketing_boost: float,
 ) -> pd.DataFrame:
     """
-    Build the SKU–day modeling table with features:
-     - price & rolling baseline price → discount_pct
-     - freight imputation and missing indicator
-     - inventory scarcity (on_hand, inv_ratio, days_to_oos_est)
-     - cyclic seasonality (dow_sin, dow_cos, month_sin, month_cos)
-     - flash campaign interactions
-     - marketing index
-     - lagged demand
-     - elasticity buckets
-     - one-hot product categories (top 10 + other)
+    Apply FE using persisted artifacts:
     """
-    # 1) Use inventory_df as backbone
     df = inventory_df.copy()
     df['date'] = pd.to_datetime(df['date'])
-    
-    # 2) Merge static product attributes
+
+    # Merge product info
     df = df.merge(
         products_df[['product_id','category_name']],
         on='product_id', how='left'
     )
-    
-    # 3) Freight value imputation
+
+    # Freight imputation & missing indicator
     df['freight_missing'] = df['freight_value'].isna().astype(int)
-    df['freight_value'] = (
-        df.groupby('category_name')['freight_value']
-          .transform(lambda x: x.fillna(x.median()))
+    df['freight_value'] = df.apply(
+        lambda row: freight_median_by_cat.get(row['category_name'], global_freight_median)
+                    if pd.isna(row['freight_value']) else row['freight_value'],
+        axis=1
     )
-    overall_med = df['freight_value'].median()
-    df['freight_value'] = df['freight_value'].fillna(overall_med)
-    
-    # 4) Fill price gaps
+
+    # Price fill-forward/back
     df.sort_values(['product_id','date'], inplace=True)
-    df['price'] = (
-        df.groupby('product_id')['price']
-          .ffill()
-          .bfill()
-    )
-    
-    # 5) Rolling baseline price
+    df['price'] = df.groupby('product_id')['price'].ffill().bfill()
+
+    # Rolling baseline price (30-day median shifted by 1)
     df['baseline_price_30d'] = (
         df.groupby('product_id')['price']
           .transform(lambda x: x.rolling(30, min_periods=1).median().shift(1))
+          .fillna(df['price'])
     )
-    df['baseline_price_30d'] = df['baseline_price_30d'].fillna(df['price'])
     
-    # 6) Discount
+
+    # Impute missing baseline prices by defaulting to the actual daily price
+    df['baseline_price_30d'] = (df['baseline_price_30d'].fillna(df['price'])['price']
+          .transform(lambda x: x.rolling(30, min_periods=1).median().shift(1))
+    )
+    # Discount percentage
     df['discount_pct'] = 1 - df['price'] / df['baseline_price_30d']
     df['discount_pct'] = df['discount_pct'].fillna(0).clip(lower=0)
-    
-    # 7) Inventory scarcity
+
+    # Inventory scarcity features
     df['inv_ratio'] = df['on_hand'] / (df['on_hand'] + df['demand']).replace({0: np.nan})
     df['inv_ratio'] = df['inv_ratio'].fillna(0)
-    
-    # 8) Days to OOS
+
+    # Days to stock-out estimate (on_hand / 7-day avg demand)
     df['ma7_demand'] = (
         df.groupby('product_id')['demand']
           .transform(lambda x: x.rolling(7, min_periods=1).mean().shift(1))
@@ -463,8 +498,8 @@ def engineer_features(
     df['days_to_oos_est'] = df['on_hand'] / df['ma7_demand'].replace({0: np.nan})
     df['days_to_oos_est'] = df['days_to_oos_est'].fillna(0)
     df.drop(columns=['ma7_demand'], inplace=True)
-    
-    # 9) Seasonality
+
+    # Seasonality encodings
     df['dow'] = df['date'].dt.weekday
     df['dow_sin'] = np.sin(2 * np.pi * df['dow'] / 7)
     df['dow_cos'] = np.cos(2 * np.pi * df['dow'] / 7)
@@ -472,36 +507,45 @@ def engineer_features(
     df['month_sin'] = np.sin(2 * np.pi * (df['month'] - 1) / 12)
     df['month_cos'] = np.cos(2 * np.pi * (df['month'] - 1) / 12)
     df.drop(columns=['dow','month'], inplace=True)
-    
-    # 10) Flash features
+
+    # Flash features
     df['flash_flag'] = df['flash_flag'].astype(int)
     df['discount_x_flash'] = df['discount_pct'] * df['flash_flag']
-    
-    # 11) Marketing index
-    df['marketing_idx'] = np.where(df['flash_flag']==1, marketing_boost, 20)
-    
-    # 12) Lagged demand
+
+    # Marketing intensity
+    df['marketing_idx'] = np.where(df['flash_flag'] == 1, marketing_boost, 20)
+
+    # Lagged demand features
     df['lag1_units'] = df.groupby('product_id')['demand'].shift(1).fillna(0)
     df['lag7_units'] = (
         df.groupby('product_id')['demand']
           .transform(lambda x: x.rolling(7, min_periods=1).mean().shift(1))
           .fillna(0)
     )
-    
-    # 13) Elasticity buckets
-    bins = [-np.inf, 0, 0.05, 0.20, np.inf]
-    labels = ['zero', 'low', 'medium', 'high']
-    df['elasticity_bucket'] = pd.cut(df['discount_pct'], bins=bins, labels=labels)
-    
-    # 14) One-hot categories
-    top10 = df['category_name'].value_counts().nlargest(10).index
-    for cat in top10:
-        df[f"cat_{cat}"] = (df['category_name']==cat).astype(int)
-    df['cat_other'] = (~df['category_name'].isin(top10)).astype(int)
-    
-    # 15) Final cleanup
-    df = df.sort_values(['product_id','date']).reset_index(drop=True)
+
+    # Elasticity buckets one-hot
+    elasticity_dummies = pd.get_dummies(
+        df['discount_pct'].apply(
+            lambda x: 'zero' if x == 0 else 'low' if x <= 0.05 else 'medium' if x <= 0.20 else 'high'
+        ),
+        prefix='elasticity'
+    )
+    df = pd.concat([df, elasticity_dummies], axis=1)
+
+    # Category one-hot using top_categories list
+    for cat in top_categories:
+        df[f"cat_{cat}"] = (df['category_name'] == cat).astype(int)
+    df['cat_other'] = (~df['category_name'].isin(top_categories)).astype(int)
+
+    # SKU ordinal encoding
+    df['sku_le'] = sku_encoder.transform(df['product_id'])
+
+    # Final cleanup: drop identifiers
+    df = df.drop(columns=['product_id','category_name'])
+    df = df.sort_values(['sku_le','date']).reset_index(drop=True)
+
     return df
+
 
 # ------------------------------------------------------------------
 # 6 ▸ Model training (regression)

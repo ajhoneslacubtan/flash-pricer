@@ -16,18 +16,19 @@ The configuration is run when starting the Orchestrator.
 """
 import numpy as np
 from algorithms.algorithms import (
+    fit_feature_artifacts,
     load_orders,
     load_products,
     generate_flash_calendar,
     tag_flash_window,
     simulate_inventory,
-    engineer_features,
     train_demand_model,
     build_price_grid,
     predict_units,
     compute_profit_surface,
     optimize_price,
     evaluate_flash_day,
+    transform_features,
 )
 from taipy import Config, Scope
 
@@ -103,6 +104,10 @@ products_raw_dn_cfg = Config.configure_sql_data_node(
 
 # persisted outputs (parquet/pickle)
 flash_calendar_dn_cfg      = Config.configure_data_node(id="flash_calendar_dn",      storage_type="parquet", scope=Scope.GLOBAL)
+freight_median_by_cat_dn_cfg = Config.configure_data_node(id="freight_median_by_cat_dn", storage_type="parquet", scope=Scope.GLOBAL)
+global_freight_median_dn_cfg = Config.configure_data_node(id="global_freight_median_dn", storage_type="pickle", scope=Scope.GLOBAL)
+top_categories_dn_cfg      = Config.configure_data_node(id="top_categories_dn",      storage_type="pickle",  scope=Scope.GLOBAL)
+sku_encoder_dn_cfg         = Config.configure_data_node(id="sku_encoder_dn",         storage_type="pickle",  scope=Scope.GLOBAL)
 features_dn_cfg            = Config.configure_data_node(id="features_dn",            storage_type="parquet", scope=Scope.GLOBAL)
 model_dn_cfg               = Config.configure_data_node(id="model_dn",               storage_type="pickle",  scope=Scope.GLOBAL)
 feature_importance_dn_cfg  = Config.configure_data_node(id="feature_importance_dn",  storage_type="parquet", scope=Scope.GLOBAL)
@@ -190,17 +195,34 @@ simulate_inventory_task_cfg = Config.configure_task(
     skippable=True,
 )
 
-engineer_features_task_cfg = Config.configure_task(
-    "engineer_features_task",
-    engineer_features,
-    input=[
-        products_df_dn_cfg,
-        inventory_df_dn_cfg,
-        marketing_boost_dn_cfg,
+fit_feature_artifacts_task_cfg = Config.configure_task(
+    id="fit_feature_artifacts_task",
+    function=fit_feature_artifacts,
+    input=[inventory_df_dn_cfg, products_df_dn_cfg],
+    output=[
+        freight_median_by_cat_dn_cfg,
+        global_freight_median_dn_cfg,
+        top_categories_dn_cfg,
+        sku_encoder_dn_cfg,
     ],
-    output=features_dn_cfg,
     skippable=True,
 )
+
+transform_features_task_cfg = Config.configure_task(
+    id="transform_features_task",
+    function=transform_features,
+    input=[
+        inventory_df_dn_cfg,
+        products_df_dn_cfg,
+        freight_median_by_cat_dn_cfg,
+        global_freight_median_dn_cfg,
+        top_categories_dn_cfg,
+        sku_encoder_dn_cfg,
+        marketing_boost_dn_cfg,
+    ],
+    output=[features_dn_cfg],
+)
+
 
 train_demand_model_task_cfg = Config.configure_task(
     "train_demand_model_task",
@@ -260,7 +282,8 @@ scenario_cfg = Config.configure_scenario(
         generate_flash_calendar_task_cfg,
         tag_flash_window_task_cfg,
         simulate_inventory_task_cfg,
-        engineer_features_task_cfg,
+        fit_feature_artifacts_task_cfg,
+        transform_features_task_cfg,
         train_demand_model_task_cfg,
         build_price_grid_task_cfg,
         predict_units_task_cfg,
@@ -280,7 +303,8 @@ scenario_cfg.add_sequences({
         generate_flash_calendar_task_cfg,
         tag_flash_window_task_cfg,
         simulate_inventory_task_cfg,
-        engineer_features_task_cfg,
+        fit_feature_artifacts_task_cfg,
+        transform_features_task_cfg,
     ],
     "train_seq": [train_demand_model_task_cfg],
     "optimize_seq": [
