@@ -395,71 +395,113 @@ def simulate_inventory(tagged_orders_df_dn: pd.DataFrame,
 # ------------------------------------------------------------------
 # 5 ▸ Feature engineering
 # ------------------------------------------------------------------
+
 def engineer_features(
-    tagged_orders_df_dn: pd.DataFrame,
-    products_df_dn: pd.DataFrame,
-    inventory_df_dn: pd.DataFrame,
-    marketing_boost: float = 20,
-    **_kwargs,
+    products_df: pd.DataFrame,
+    inventory_df: pd.DataFrame,
+    marketing_boost: float,
 ) -> pd.DataFrame:
     """
-    Aggregate to product-date level with explanatory features.
-    Missing inventory ⇒ assumed infinite (99_999).
+    Build the SKU–day modeling table with features:
+     - price & rolling baseline price → discount_pct
+     - freight imputation and missing indicator
+     - inventory scarcity (on_hand, inv_ratio, days_to_oos_est)
+     - cyclic seasonality (dow_sin, dow_cos, month_sin, month_cos)
+     - flash campaign interactions
+     - marketing index
+     - lagged demand
+     - elasticity buckets
+     - one-hot product categories (top 10 + other)
     """
-    orders = tagged_orders_df_dn.copy()
-    orders["date"] = orders["ts"].dt.floor("D")
-
-    # Base aggregations
-    agg = (
-        orders.groupby(["product_id", "date"])
-              .agg(
-                  units_sold=("order_id", "count"),
-                  avg_price=("price", "mean"),
-                  flash_flag=("flash_flag", "max"),
-              )
-              .reset_index()
+    # 1) Use inventory_df as backbone
+    df = inventory_df.copy()
+    df['date'] = pd.to_datetime(df['date'])
+    
+    # 2) Merge static product attributes
+    df = df.merge(
+        products_df[['product_id','category_name']],
+        on='product_id', how='left'
     )
-
-    # Baseline (non-flash) median price per SKU
-    baseline_price = (
-        agg.query("flash_flag == 0")
-           .groupby("product_id")["avg_price"]
-           .median()
-           .rename("baseline_price")
-           .reset_index()
+    
+    # 3) Freight value imputation
+    df['freight_missing'] = df['freight_value'].isna().astype(int)
+    df['freight_value'] = (
+        df.groupby('category_name')['freight_value']
+          .transform(lambda x: x.fillna(x.median()))
     )
-    agg = agg.merge(baseline_price, on="product_id", how="left")
-    agg["baseline_price"].fillna(agg["avg_price"], inplace=True)
-
-    # Discount percentage
-    agg["discount_pct"] = (
-        (agg["baseline_price"] - agg["avg_price"])
-        / agg["baseline_price"].replace(0, np.nan)
-    ).fillna(0)
-
-    # Join inventory
-    features = agg.merge(
-        inventory_df_dn,
-        on=["product_id", "date"],
-        how="left",
+    overall_med = df['freight_value'].median()
+    df['freight_value'] = df['freight_value'].fillna(overall_med)
+    
+    # 4) Fill price gaps
+    df.sort_values(['product_id','date'], inplace=True)
+    df['price'] = (
+        df.groupby('product_id')['price']
+          .ffill()
+          .bfill()
     )
-
-    # Seasonality dummies
-    features["month"]       = features["date"].dt.month
-    features["day_of_week"] = features["date"].dt.dayofweek
-    # features["is_holiday"]  = features["date"].isin(BR_HOLIDAYS).astype(int)
-
-    # Marketing index
-    features["marketing_idx"] = np.where(
-        features["flash_flag"] == 1,
-        marketing_boost,
-        marketing_boost / 4,
+    
+    # 5) Rolling baseline price
+    df['baseline_price_30d'] = (
+        df.groupby('product_id')['price']
+          .transform(lambda x: x.rolling(30, min_periods=1).median().shift(1))
     )
-
-    features["inventory"] = features["inventory"].fillna(99_999)
-
-    return features
-
+    df['baseline_price_30d'] = df['baseline_price_30d'].fillna(df['price'])
+    
+    # 6) Discount
+    df['discount_pct'] = 1 - df['price'] / df['baseline_price_30d']
+    df['discount_pct'] = df['discount_pct'].fillna(0).clip(lower=0)
+    
+    # 7) Inventory scarcity
+    df['inv_ratio'] = df['on_hand'] / (df['on_hand'] + df['demand']).replace({0: np.nan})
+    df['inv_ratio'] = df['inv_ratio'].fillna(0)
+    
+    # 8) Days to OOS
+    df['ma7_demand'] = (
+        df.groupby('product_id')['demand']
+          .transform(lambda x: x.rolling(7, min_periods=1).mean().shift(1))
+    )
+    df['days_to_oos_est'] = df['on_hand'] / df['ma7_demand'].replace({0: np.nan})
+    df['days_to_oos_est'] = df['days_to_oos_est'].fillna(0)
+    df.drop(columns=['ma7_demand'], inplace=True)
+    
+    # 9) Seasonality
+    df['dow'] = df['date'].dt.weekday
+    df['dow_sin'] = np.sin(2 * np.pi * df['dow'] / 7)
+    df['dow_cos'] = np.cos(2 * np.pi * df['dow'] / 7)
+    df['month'] = df['date'].dt.month
+    df['month_sin'] = np.sin(2 * np.pi * (df['month'] - 1) / 12)
+    df['month_cos'] = np.cos(2 * np.pi * (df['month'] - 1) / 12)
+    df.drop(columns=['dow','month'], inplace=True)
+    
+    # 10) Flash features
+    df['flash_flag'] = df['flash_flag'].astype(int)
+    df['discount_x_flash'] = df['discount_pct'] * df['flash_flag']
+    
+    # 11) Marketing index
+    df['marketing_idx'] = np.where(df['flash_flag']==1, marketing_boost, 20)
+    
+    # 12) Lagged demand
+    df['lag1_units'] = df.groupby('product_id')['demand'].shift(1).fillna(0)
+    df['lag7_units'] = (
+        df.groupby('product_id')['demand']
+          .transform(lambda x: x.rolling(7, min_periods=1).mean().shift(1))
+          .fillna(0)
+    )
+    
+    # 13) Elasticity buckets
+    bins = [-np.inf, 0, 0.05, 0.20, np.inf]
+    labels = ['zero', 'low', 'medium', 'high']
+    df['elasticity_bucket'] = pd.cut(df['discount_pct'], bins=bins, labels=labels)
+    
+    # 14) One-hot categories
+    top10 = df['category_name'].value_counts().nlargest(10).index
+    for cat in top10:
+        df[f"cat_{cat}"] = (df['category_name']==cat).astype(int)
+    df['cat_other'] = (~df['category_name'].isin(top10)).astype(int)
+    
+    # 15) Final cleanup
+    df = df.sort_values(['product_id','date']).reset_index(drop=True)
+    return df
 
 # ------------------------------------------------------------------
 # 6 ▸ Model training (regression)

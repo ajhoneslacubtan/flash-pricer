@@ -19,7 +19,7 @@ storage_type = "sql"
 scope = "GLOBAL:SCOPE"
 db_name = "olist"
 db_engine = "sqlite"
-read_query = "SELECT * FROM olist_products_dataset;"
+read_query = "\n        SELECT\n            p.product_id,\n            t.product_category_name_english AS category_name,\n            p.product_name_lenght,\n            p.product_description_lenght,\n            p.product_photos_qty,\n            p.product_weight_g,\n            p.product_length_cm,\n            p.product_height_cm,\n            p.product_width_cm\n        FROM\n        olist_products_dataset AS p\n        LEFT JOIN\n        product_category_name_translation AS t\n            ON p.product_category_name = t.product_category_name;\n    "
 write_query_builder = "configuration.config._no_write:function"
 sqlite_folder_path = "data/"
 
@@ -109,13 +109,13 @@ default_data = "profit"
 function = "algorithms.algorithms.load_orders:function"
 inputs = [ "orders_raw_dn:SECTION", "seller_id_dn:SECTION",]
 outputs = [ "orders_df_dn:SECTION",]
-skippable = "False:bool"
+skippable = "True:bool"
 
 [TASK.load_products_task]
 function = "algorithms.algorithms.load_products:function"
 inputs = [ "products_raw_dn:SECTION", "orders_df_dn:SECTION",]
 outputs = [ "products_df_dn:SECTION",]
-skippable = "False:bool"
+skippable = "True:bool"
 
 [TASK.generate_flash_calendar_task]
 function = "algorithms.algorithms.generate_flash_calendar:function"
@@ -127,19 +127,19 @@ skippable = "True:bool"
 function = "algorithms.algorithms.tag_flash_window:function"
 inputs = [ "orders_df_dn:SECTION", "flash_calendar_dn:SECTION",]
 outputs = [ "tagged_orders_df_dn:SECTION",]
-skippable = "False:bool"
+skippable = "True:bool"
 
 [TASK.simulate_inventory_task]
 function = "algorithms.algorithms.simulate_inventory:function"
 inputs = [ "tagged_orders_df_dn:SECTION", "inv_method_dn:SECTION",]
 outputs = [ "inventory_df_dn:SECTION",]
-skippable = "False:bool"
+skippable = "True:bool"
 
 [TASK.engineer_features_task]
 function = "algorithms.algorithms.engineer_features:function"
-inputs = [ "tagged_orders_df_dn:SECTION", "products_df_dn:SECTION", "inventory_df_dn:SECTION", "marketing_boost_dn:SECTION",]
+inputs = [ "products_df_dn:SECTION", "inventory_df_dn:SECTION", "marketing_boost_dn:SECTION",]
 outputs = [ "features_dn:SECTION",]
-skippable = "False:bool"
+skippable = "True:bool"
 
 [TASK.train_demand_model_task]
 function = "algorithms.algorithms.train_demand_model:function"
@@ -194,7 +194,7 @@ initial_inventory = "50:int"
 [SCENARIO.flash_pricing_scenario.comparators]
 
 [SCENARIO.flash_pricing_scenario.sequences]
-prep_seq = [ "load_orders_task:SECTION", "load_products_task:SECTION", "generate_flash_calendar_task:SECTION", "tag_flash_window_task:SECTION", "simulate_inventory_task:SECTION",]
+prep_seq = [ "load_orders_task:SECTION", "load_products_task:SECTION", "generate_flash_calendar_task:SECTION", "tag_flash_window_task:SECTION", "simulate_inventory_task:SECTION", "engineer_features_task:SECTION",]
 train_seq = [ "train_demand_model_task:SECTION",]
 optimize_seq = [ "build_price_grid_task:SECTION", "predict_units_task:SECTION", "compute_profit_surface_task:SECTION", "optimize_price_task:SECTION",]
 kpi_seq = [ "evaluate_flash_day_task:SECTION",]

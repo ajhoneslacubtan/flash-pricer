@@ -80,7 +80,23 @@ products_raw_dn_cfg = Config.configure_sql_data_node(
     db_name="olist",
     sqlite_folder_path="data/",
     db_extra_args={},
-    read_query="SELECT * FROM olist_products_dataset;",
+    read_query="""
+        SELECT
+            p.product_id,
+            t.product_category_name_english AS category_name,
+            p.product_name_lenght,
+            p.product_description_lenght,
+            p.product_photos_qty,
+            p.product_weight_g,
+            p.product_length_cm,
+            p.product_height_cm,
+            p.product_width_cm
+        FROM
+        olist_products_dataset AS p
+        LEFT JOIN
+        product_category_name_translation AS t
+            ON p.product_category_name = t.product_category_name;
+    """,
     write_query_builder=_no_write,
     scope=Scope.GLOBAL,
 )
@@ -139,6 +155,7 @@ load_orders_task_cfg = Config.configure_task(
     function=load_orders,
     input=[orders_raw_dn_cfg, seller_id_dn_cfg],
     output=orders_df_dn_cfg,
+    skippable=True,
 )
 
 load_products_task_cfg = Config.configure_task(
@@ -146,6 +163,7 @@ load_products_task_cfg = Config.configure_task(
     function=load_products,
     input=[products_raw_dn_cfg, orders_df_dn_cfg],
     output=products_df_dn_cfg,
+    skippable=True,
 )
 
 generate_flash_calendar_task_cfg = Config.configure_task(
@@ -161,6 +179,7 @@ tag_flash_window_task_cfg = Config.configure_task(
     function=tag_flash_window,
     input=[orders_df_dn_cfg, flash_calendar_dn_cfg],
     output=tagged_orders_df_dn_cfg,
+    skippable=True,
 )
 
 simulate_inventory_task_cfg = Config.configure_task(
@@ -168,18 +187,19 @@ simulate_inventory_task_cfg = Config.configure_task(
     simulate_inventory,
     input=[tagged_orders_df_dn_cfg, inv_method_dn_cfg],
     output=inventory_df_dn_cfg,
+    skippable=True,
 )
 
 engineer_features_task_cfg = Config.configure_task(
     "engineer_features_task",
     engineer_features,
     input=[
-        tagged_orders_df_dn_cfg,
         products_df_dn_cfg,
         inventory_df_dn_cfg,
         marketing_boost_dn_cfg,
     ],
     output=features_dn_cfg,
+    skippable=True,
 )
 
 train_demand_model_task_cfg = Config.configure_task(
@@ -260,7 +280,7 @@ scenario_cfg.add_sequences({
         generate_flash_calendar_task_cfg,
         tag_flash_window_task_cfg,
         simulate_inventory_task_cfg,
-        # engineer_features_task_cfg,
+        engineer_features_task_cfg,
     ],
     "train_seq": [train_demand_model_task_cfg],
     "optimize_seq": [
