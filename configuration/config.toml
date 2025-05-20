@@ -95,23 +95,18 @@ scope = "GLOBAL:SCOPE"
 storage_type = "in_memory"
 scope = "GLOBAL:SCOPE"
 
+[DATA_NODE.price_grid_results_dn]
+storage_type = "in_memory"
+scope = "GLOBAL:SCOPE"
+
 [DATA_NODE.flash_date_dn]
-default_data = "2017-11-24"
+default_data = "2017-11-23"
 
 [DATA_NODE.synthetic_count_dn]
 default_data = "5:int"
 
 [DATA_NODE.inv_method_dn]
 scope = "GLOBAL:SCOPE"
-
-[DATA_NODE.price_grid_min_dn]
-default_data = "0.5:float"
-
-[DATA_NODE.price_grid_max_dn]
-default_data = "1.2:float"
-
-[DATA_NODE.price_grid_n_dn]
-default_data = "30:int"
 
 [DATA_NODE.unit_cost_factor_dn]
 default_data = "0.6:float"
@@ -151,7 +146,7 @@ skippable = "True:bool"
 
 [TASK.simulate_inventory_task]
 function = "algorithms.algorithms.simulate_inventory:function"
-inputs = [ "tagged_orders_df_dn:SECTION", "inv_method_dn:SECTION",]
+inputs = [ "tagged_orders_df_dn:SECTION", "flash_calendar_dn:SECTION", "inv_method_dn:SECTION",]
 outputs = [ "inventory_df_dn:SECTION",]
 skippable = "True:bool"
 
@@ -175,13 +170,13 @@ skippable = "True:bool"
 
 [TASK.build_price_grid_task]
 function = "algorithms.algorithms.build_price_grid:function"
-inputs = [ "features_dn:SECTION", "price_grid_min_dn:SECTION", "price_grid_max_dn:SECTION", "price_grid_n_dn:SECTION",]
-outputs = [ "price_grid_dn:SECTION",]
+inputs = [ "features_dn:SECTION", "price_grid_dn:SECTION",]
+outputs = [ "price_grid_results_dn:SECTION",]
 skippable = "False:bool"
 
 [TASK.predict_units_task]
 function = "algorithms.algorithms.predict_units:function"
-inputs = [ "model_dn:SECTION", "price_grid_dn:SECTION", "features_dn:SECTION",]
+inputs = [ "model_dn:SECTION", "price_grid_results_dn:SECTION", "features_dn:SECTION",]
 outputs = [ "pred_units_dn:SECTION",]
 skippable = "False:bool"
 
@@ -211,6 +206,11 @@ additional_data_nodes = []
 
 [DATA_NODE.products_raw_dn.db_extra_args]
 
+[DATA_NODE.price_grid_dn.default_data]
+min = "0.5:float"
+max = "2.0:float"
+n = "30:int"
+
 [DATA_NODE.inv_method_dn.default_data]
 method = "sQ"
 s = "20:int"
@@ -222,7 +222,7 @@ initial_inventory = "50:int"
 [SCENARIO.flash_pricing_scenario.sequences]
 prep_seq = [ "load_orders_task:SECTION", "load_products_task:SECTION", "generate_flash_calendar_task:SECTION", "tag_flash_window_task:SECTION", "simulate_inventory_task:SECTION", "fit_feature_artifacts_task:SECTION", "transform_features_task:SECTION",]
 train_seq = [ "train_demand_model_task:SECTION",]
-optimize_seq = [ "build_price_grid_task:SECTION", "predict_units_task:SECTION", "compute_profit_surface_task:SECTION", "optimize_price_task:SECTION",]
+optimize_seq = [ "build_price_grid_task:SECTION", "predict_units_task:SECTION",]
 kpi_seq = [ "evaluate_flash_day_task:SECTION",]
 
 [DATA_NODE.inv_method_dn.default_data.lead_time]

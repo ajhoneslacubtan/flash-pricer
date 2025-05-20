@@ -21,6 +21,8 @@ from sklearn.metrics import root_mean_squared_error
 from algorithms.inventory_policy import InventoryMethod
 from numba import njit, prange
 
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ──────────────────────────────
 # Helper date utilities
@@ -116,109 +118,80 @@ def load_products(
 # ──────────────────────────────
 # 2 ▸ Flash-calendar generator
 # ──────────────────────────────
+SPECIAL_FIXED = {(6, 12), (10, 12), (12, 24), (12, 25)}
+
+# ------------------------------------------------------------------------------
+# Flash‑calendar generator with YEAR‑PROJECTION anchor logic
+# ------------------------------------------------------------------------------
+
 def generate_flash_calendar(
     flash_date: str | datetime,
     synthetic_count: int = 5,
 ) -> pd.DataFrame:
+    """Return a DataFrame of 24‑h windows, projecting the user‑chosen
+    *month/day* onto every data year so an anchor exists inside history.
     """
-    Build a table of 24-hour flash windows for every year in the dataset.
+    anchor_full = pd.to_datetime(flash_date).date()  # e.g., 2025‑11‑28
+    anchor_md   = (anchor_full.month, anchor_full.day)
 
-    Returns
-    -------
-    pd.DataFrame
-        Columns: ['start_ts', 'end_ts', 'label', 'origin']
-    """
-    # convert flash_date param to date object
-    anchor_date = pd.to_datetime(flash_date).date()
-
-    # study window (hard-coded 2016-2018 for Olist; extend if needed)
-    years = [2016, 2017, 2018]
-
-    starts: list[datetime] = []
-    labels: list[str] = []
-    origin: list[str] = []
+    years = [2016, 2017, 2018]  # Olist span
+    starts, labels, origins = [], [], []
 
     for y in years:
         # Real retail flash days
-        for label, d in [
+        for lbl, d in [
             ("black_friday", get_black_friday(y)),
-            ("mothers_day", get_mothers_day(y)),
-            ("fathers_day", get_fathers_day(y)),
+            ("mothers_day",  get_mothers_day(y)),
+            ("fathers_day",  get_fathers_day(y)),
         ]:
             starts.append(datetime.combine(d, datetime.min.time()))
-            labels.append(label)
-            origin.append("real")
+            labels.append(lbl); origins.append("real")
 
-        # Brazilian fixed retail peaks & holidays
+        # Fixed peaks & national holidays
         for m, d in SPECIAL_FIXED:
-            date_obj = datetime(y, m, d).date()
-            starts.append(datetime.combine(date_obj, datetime.min.time()))
-            labels.append("fixed_peak")
-            origin.append("real")
-
-        # National holidays via holidays.BR
+            starts.append(datetime(y, m, d))
+            labels.append("fixed_peak"); origins.append("real")
         for hol_date, _ in holidays.BR(years=[y]).items():
             starts.append(datetime.combine(hol_date, datetime.min.time()))
-            labels.append("holiday")
-            origin.append("real")
+            labels.append("holiday"); origins.append("real")
 
-        # Synthetic extra windows
-        rng = pd.date_range(
-            start=datetime(y, 1, 1),
-            end=datetime(y, 12, 31),
-            freq="D",
-        )
-        synthetic_choices = random.sample(list(rng), k=synthetic_count)
-        for d in synthetic_choices:
-            starts.append(d.normalize())
-            labels.append("synthetic")
-            origin.append("synthetic")
+        # Synthetic windows
+        rng = pd.date_range(datetime(y,1,1), datetime(y,12,31), freq="D")
+        for d in random.sample(list(rng), k=synthetic_count):
+            starts.append(d.normalize()); labels.append("synthetic"); origins.append("synthetic")
 
-    # user-supplied anchor flash date (if not already in list)
-    if anchor_date not in [dt.date() for dt in starts]:
-        starts.append(datetime.combine(anchor_date, datetime.min.time()))
-        labels.append("anchor")
-        origin.append("user")
+        # Anchor projected into this year
+        starts.append(datetime(y, *anchor_md))
+        labels.append("anchor"); origins.append("user")
 
-    start_ts = pd.Series(starts, name="start_ts").sort_values().reset_index(drop=True)
-    df = pd.DataFrame(
-        {
-            "start_ts": start_ts,
-            "end_ts": start_ts + pd.Timedelta(days=1) - pd.Timedelta(seconds=1),
-            "label": labels,
-            "origin": origin,
-        }
-    )
-    return df.drop_duplicates(subset=["start_ts"])
+    df = pd.DataFrame({
+        "start_ts": pd.Series(starts).sort_values().reset_index(drop=True)
+    })
+    df["label"]  = labels
+    df["origin"] = origins
+    df["end_ts"] = df["start_ts"] + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
 
+    # keep one row per start_ts preferring 'anchor' > real > synthetic
+    prio = {"anchor":0,"black_friday":1,"mothers_day":1,"fathers_day":1,
+            "holiday":2,"fixed_peak":2,"synthetic":3}
+    df["_rank"] = df["label"].map(prio)
+    df = (df.sort_values(["start_ts","_rank"]).drop_duplicates("start_ts").drop(columns="_rank").reset_index(drop=True))
+    return df
 
 # ──────────────────────────────
 # 3 ▸ Tag orders with flash_flag
 # ──────────────────────────────
-def tag_flash_window(
-    orders_df: pd.DataFrame,
-    flash_calendar_df: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Add a boolean `flash_flag` column to each order row.
-
-    Rules
-    -----
-    flash_flag = 1  if order timestamp falls between any
-                    start_ts and end_ts in flash_calendar_df.
-
-    Returns
-    -------
-    pd.DataFrame
-        Same columns as orders_df plus 'flash_flag' (bool)
-    """
+def tag_flash_window(orders_df: pd.DataFrame, flash_calendar_df: pd.DataFrame) -> pd.DataFrame:
+    """Add `flash_flag` (any window) and `anchor_flag` (user anchor) to each order."""
     df = orders_df.copy()
-    df["flash_flag"] = False
+    df["flash_flag"]  = False
+    df["anchor_flag"] = False
 
-    # Build interval index for efficient lookup
     for _, row in flash_calendar_df.iterrows():
         mask = (df["ts"] >= row["start_ts"]) & (df["ts"] <= row["end_ts"])
         df.loc[mask, "flash_flag"] = True
+        if row["label"] == "anchor":
+            df.loc[mask, "anchor_flag"] = True
     return df.reset_index(drop=True)
 
 
@@ -299,91 +272,101 @@ def _simulate_RS(demand, R, S, initial_inv, lt_low, lt_high):
 
 
 def simulate_inventory(tagged_orders_df_dn: pd.DataFrame,
+                       flash_calendar_df: pd.DataFrame,
                        inv_method_dict: dict) -> pd.DataFrame:
-
-    # ------------------------------------------------------------------
-    # 1 ▸ rebuild InventoryMethod from Taipy JSON-dict
-    # ------------------------------------------------------------------
+    """Simulate on‑hand inventory and retain both flash_flag and anchor_flag.
+    The anchor_flag isolates the user‑chosen campaign date for inference
+    while flash_flag covers all special days for model training.
+    """
     policy = _dict_to_policy(inv_method_dict.copy())
 
-    # ------------------------------------------------------------------
-    # 2 ▸ pandas: daily aggregation & full calendar
-    # ------------------------------------------------------------------
+    # 1 ▸ daily aggregation including both flags
     df = tagged_orders_df_dn.copy()
     df['date'] = pd.to_datetime(df['ts']).dt.floor('D')
     daily = (
-        df.groupby(['product_id', 'date'])
-          .agg(
-              demand        = ('date', 'size'),
-              price         = ('price', 'mean'),
-              freight_value = ('freight_value', 'mean'),
-              flash_flag    = ('flash_flag', 'max')
-          )
-          .reset_index()
+    df.groupby(['product_id', 'date'])
+      .agg(
+          demand        = ('date', 'size'),
+          price         = ('price', 'mean'),
+          freight_value = ('freight_value', 'mean'),
+          flash_flag    = ('flash_flag',  'max'),
+          anchor_flag   = ('anchor_flag', 'max')      # NEW
+      )
+      .reset_index()
     )
 
-    start, end  = daily['date'].min(), daily['date'].max()
-    all_dates   = pd.date_range(start, end, freq='D')
-    skus        = daily['product_id'].unique()
 
-    # full grid → ensure zero-demand days are present
+    # 2 ▸ ensure full calendar grid
+    start, end = daily['date'].min(), daily['date'].max()
+    all_dates  = pd.date_range(start, end, freq='D')
+    skus       = daily['product_id'].unique()
+
     full = (
         pd.MultiIndex.from_product([skus, all_dates],
-                                   names=['product_id', 'date'])
-          .to_frame(index=False)
-          .merge(daily, on=['product_id', 'date'], how='left')
-          .fillna({'demand': 0,
-                   'flash_flag': False,
-                   'price': np.nan,
-                   'freight_value': np.nan})
+                                names=['product_id', 'date'])
+        .to_frame(index=False)
+        .merge(daily,
+                on=['product_id', 'date'],
+                how='left')
+        .fillna({
+            'demand': 0,
+            'flash_flag': False,
+            'anchor_flag': False,      # NEW
+            'price': np.nan,
+            'freight_value': np.nan
+        })
     )
 
-    # ------------------------------------------------------------------
-    # 3 ▸ build per-SKU empirical demand pools & sample
-    # ------------------------------------------------------------------
+    anchor_windows = flash_calendar_df.query("label == 'anchor'")
+    anchor_dates = pd.date_range(
+        anchor_windows['start_ts'].min(), anchor_windows['end_ts'].max(), freq="D"
+    ).date
+    full["anchor_flag"] = full["date"].dt.date.isin(anchor_dates).astype(int)
+
+
+    # 3 ▸ empirical demand pools
     n_days, n_sku = len(all_dates), len(skus)
     demand_mat = np.zeros((n_days, n_sku), dtype=np.int64)
 
     for idx, sku in enumerate(skus):
         hist_flash  = full[(full.product_id == sku) & (full.flash_flag)].demand.values
         hist_normal = full[(full.product_id == sku) & (~full.flash_flag)].demand.values
-        if hist_flash.size == 0:   hist_flash  = hist_normal
-        if hist_normal.size == 0:  hist_normal = np.array([0])
+        if hist_flash.size == 0:
+            hist_flash = hist_normal
+        if hist_normal.size == 0:
+            hist_normal = np.array([0])
 
         sku_rows = full.product_id == sku
         for t, day in enumerate(all_dates):
             is_flash = full.loc[sku_rows & (full.date == day), 'flash_flag'].iat[0]
             demand_mat[t, idx] = np.random.choice(hist_flash if is_flash else hist_normal)
 
-    # ------------------------------------------------------------------
-    # 4 ▸ Numba core
-    # ------------------------------------------------------------------
-    if policy.method == "sQ":
-        on_hand = _simulate_sQ(demand_mat,
-                               s = policy.s, Q = policy.Q,
-                               initial_inv = policy.initial_inventory,
-                               lt_low = policy.lead_time_low,
-                               lt_high= policy.lead_time_high)
-    elif policy.method == "RS":
-        on_hand = _simulate_RS(demand_mat,
-                               R = policy.R, S = policy.S,
-                               initial_inv = policy.initial_inventory,
-                               lt_low = policy.lead_time_low,
-                               lt_high= policy.lead_time_high)
+    # 4 ▸ numba core (policy‑specific)
+    if policy.method == 'sQ':
+        on_hand = _simulate_sQ(
+            demand_mat,
+            s=policy.s, Q=policy.Q,
+            initial_inv=policy.initial_inventory,
+            lt_low=policy.lead_time_low,
+            lt_high=policy.lead_time_high,
+        )
+    elif policy.method == 'RS':
+        on_hand = _simulate_RS(
+            demand_mat,
+            R=policy.R, S=policy.S,
+            initial_inv=policy.initial_inventory,
+            lt_low=policy.lead_time_low,
+            lt_high=policy.lead_time_high,
+        )
     else:
-        raise ValueError("Unknown policy method: " + policy.method)
+        raise ValueError(f"Unknown policy method: {policy.method}")
 
-    # ------------------------------------------------------------------
-    # 5 ▸ tidy DataFrame back for ML / reporting
-    # ------------------------------------------------------------------
-    out = full[['product_id', 'date',
-                'price', 'freight_value', 'flash_flag']].copy()
-    # after merge, rows are ordered by product_id then date ⟶ we need the same order
+    # 5 ▸ tidy back
+    out = full[['product_id', 'date', 'price', 'freight_value', 'flash_flag', 'anchor_flag']].copy()
     out = out.sort_values(['date', 'product_id']).reset_index(drop=True)
-    out['on_hand'] = on_hand.ravel(order='F')    # Fortran order: date‐major
+    out['on_hand'] = on_hand.ravel(order='F')
     out['demand']  = demand_mat.ravel(order='F')
-
-    return out.reset_index(drop=True)
+    return out
 
 # ------------------------------------------------------------------
 # 5 ▸ Feature engineering
@@ -529,7 +512,7 @@ def transform_features(
     df['sku_le'] = sku_encoder.transform(df['product_id'])
 
     # Final cleanup: drop identifiers
-    df = df.drop(columns=['product_id','category_name'])
+    df = df.drop(columns=['category_name'])
     df = df.sort_values(['sku_le','date']).reset_index(drop=True)
 
     return df
@@ -564,7 +547,7 @@ def train_demand_model(
     df = features_df.copy()
     df = df.sort_values("date")
     # drop non-feature columns
-    X = df.drop(columns=["date", "demand"])
+    X = df.drop(columns=["date", "product_id", "demand", "anchor_flag"])
     y = df["demand"].values
 
     # 2) Temporal train/validation split (e.g. last 20% as val)
@@ -616,82 +599,146 @@ def train_demand_model(
 # 7 ▸ Price grid builder
 # ------------------------------------------------------------------
 def build_price_grid(
-    features_dn: pd.DataFrame,
-    price_grid_min: float,
-    price_grid_max: float,
-    price_grid_n: int,
-    **_kwargs,
+    features_df: pd.DataFrame,
+    price_grid_params: dict
 ) -> pd.DataFrame:
     """
-    Create SKU × candidate price grid for the flash-day snapshot.
+    Build a candidate price grid per SKU for the flash day,
+    with parameters passed as a single dict.
+
+    Parameters
+    ----------
+    features_df : pd.DataFrame
+        The full feature table, must include at least:
+        ['product_id', 'flash_flag', 'baseline_price_30d', 'price']
+    price_grid_params : dict
+        {
+          "min": float,   # e.g. 0.5 for 50% of baseline
+          "max": float,   # e.g. 1.2 for 120% of baseline
+          "n": int        # number of grid points
+        }
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ['product_id', 'price']
+        One row per (SKU, candidate price).
     """
-    flash_date = features_dn["date"].max()
-    flash_df = (
-        features_dn[features_dn["date"] == flash_date]
-        .loc[:, ["product_id", "avg_price"]]
-        .rename(columns={"avg_price": "baseline_price"})
+    grid_min = price_grid_params["min"]
+    grid_max = price_grid_params["max"]
+    grid_n   = price_grid_params["n"]
+
+    # Filter to flash-day rows to get baseline prices
+    flash_df = features_df[features_df["flash_flag"] == 1]
+    base_prices = (
+        flash_df[["product_id", "baseline_price_30d"]]
+        .drop_duplicates(subset="product_id")
+        .set_index("product_id")["baseline_price_30d"]
     )
 
-    price_points = np.linspace(price_grid_min, price_grid_max, price_grid_n)
-    records = [
-        {
-            "product_id": row["product_id"],
-            "candidate_price": round(row["baseline_price"] * mult, 2),
-        }
-        for _, row in flash_df.iterrows()
-        for mult in price_points
-    ]
-    return pd.DataFrame(records)
+    rows = []
+    for sku, base in base_prices.items():
+        # fallback if baseline is missing or nonpositive
+        if pd.isna(base) or base <= 0:
+            base = flash_df.loc[flash_df["product_id"] == sku, "price"].median()
+
+        candidates = np.linspace(
+            grid_min * base,
+            grid_max * base,
+            num=grid_n
+        )
+        df_grid = pd.DataFrame({
+            "product_id": sku,
+            "price": candidates
+        })
+        rows.append(df_grid)
+
+    price_grid_df = pd.concat(rows, ignore_index=True)
+    return price_grid_df
 
 
 # ------------------------------------------------------------------
 # 8 ▸ Demand prediction over grid
 # ------------------------------------------------------------------
 def predict_units(
-    model_dn,
-    price_grid_dn: pd.DataFrame,
-    features_dn: pd.DataFrame,
-    **_kwargs,
+    model,
+    price_grid_df: pd.DataFrame,
+    features_df: pd.DataFrame,
 ) -> pd.DataFrame:
+    """Predict units sold for each candidate price on the *anchor* flash day.
+
+    Parameters
+    ----------
+    model : object
+        Trained regression model with a `.predict(X)` method.
+    price_grid_df : pd.DataFrame
+        Candidate prices. Columns: ['product_id', 'price'].
+    features_df : pd.DataFrame
+        Feature table that *includes* the boolean columns `flash_flag` and
+        `anchor_flag`.  Only rows where `anchor_flag == 1` are used for
+        inference.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns ['product_id', 'price', 'predicted_units'] for the anchor day.
     """
-    Join features to the price grid and predict units_sold.
-    """
-    model = model_dn
-    flash_date = features_dn["date"].max()
-    base_feats = features_dn.loc[
-        features_dn["date"] == flash_date,
-        [
-            "product_id",
-            "baseline_price",
-            "marketing_idx",
-            "month",
-            "day_of_week",
-            "is_holiday",
-            "inventory",
-        ],
+    # ------------------------------------------------------------------
+    # 1 ▸ Filter to anchor‑day snapshot (one row per SKU)
+    # ------------------------------------------------------------------
+    anchor_df = (
+        features_df[features_df["anchor_flag"] == 1]
+        .sort_values(["product_id", "date"])
+        .drop_duplicates(subset=["product_id"], keep="last")
+    )
+
+    if anchor_df.empty:
+        raise ValueError("No rows with anchor_flag == 1 found. Check flash_date and calendar tagging.")
+
+    # ------------------------------------------------------------------
+    # 2 ▸ Merge grid with anchor features
+    # ------------------------------------------------------------------
+    df = price_grid_df.merge(
+        anchor_df,
+        on="product_id",
+        how="left",
+        suffixes=("_candidate", "_orig"),
+    )
+
+    # ------------------------------------------------------------------
+    # 3 ▸ Override price with candidate price & recompute price‑dependent feats
+    # ------------------------------------------------------------------
+    df["price"] = df["price_candidate"]
+    df.drop(columns=[col for col in ["price_candidate", "price_orig"] if col in df.columns], inplace=True)
+
+    # Recompute discount percentage and its flash interaction
+    df["discount_pct"] = 1 - df["price"] / df["baseline_price_30d"].replace({0: np.nan})
+    df["discount_pct"].fillna(0, inplace=True)
+    df["discount_pct"] = df["discount_pct"].clip(lower=0)
+    df["discount_x_flash"] = df["discount_pct"] * df["flash_flag"]  # flash_flag==1 for anchor rows
+
+    # ------------------------------------------------------------------
+    # 4 ▸ Assemble model input matrix X
+    # ------------------------------------------------------------------
+    drop_cols = [
+        "date", "demand", "anchor_flag", "product_id",
     ]
+    X = df.drop(columns=[c for c in drop_cols if c in df.columns])
 
-    grid = price_grid_dn.merge(base_feats, on="product_id", how="left")
-    grid["discount_pct"] = (
-        (grid["baseline_price"] - grid["candidate_price"])
-        / grid["baseline_price"]
-    )
+    # --- ensure column order matches training ---
+    if hasattr(model, "feature_names_in_"):
+        X = X[model.feature_names_in_]          # reorder or raise KeyError
+    # -------------------------------------------
 
-    X = (
-        grid.rename(columns={"candidate_price": "avg_price"})
-            .loc[:, [
-                "avg_price",
-                "discount_pct",
-                "baseline_price",
-                "marketing_idx",
-                "month",
-                "day_of_week",
-                "is_holiday",
-            ]]
-    )
-    preds = model.predict(X)
-    grid["pred_units"] = np.clip(preds, 0, None)
-    return grid
+    # 5 ▸ Predict
+    df["predicted_units"] = model.predict(X)
+
+    # ------------------------------------------------------------------
+    # 5 ▸ Predict units
+    # ------------------------------------------------------------------
+    df["predicted_units"] = model.predict(X)
+
+    return df[["product_id", "price", "predicted_units"]]
 
 
 # ------------------------------------------------------------------

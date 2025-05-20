@@ -92,32 +92,41 @@ products_raw_dn_cfg = Config.configure_sql_data_node(
 )
 
 # persisted outputs (parquet/pickle)
-flash_calendar_dn_cfg      = Config.configure_data_node(id="flash_calendar_dn",      storage_type="parquet", scope=Scope.GLOBAL)
+flash_calendar_dn_cfg      = Config.configure_data_node(id="flash_calendar_dn",          storage_type="parquet", scope=Scope.GLOBAL)
 freight_median_by_cat_dn_cfg = Config.configure_data_node(id="freight_median_by_cat_dn", storage_type="parquet", scope=Scope.GLOBAL)
-global_freight_median_dn_cfg = Config.configure_data_node(id="global_freight_median_dn", storage_type="pickle", scope=Scope.GLOBAL)
-top_categories_dn_cfg      = Config.configure_data_node(id="top_categories_dn",      storage_type="pickle",  scope=Scope.GLOBAL)
-sku_encoder_dn_cfg         = Config.configure_data_node(id="sku_encoder_dn",         storage_type="pickle",  scope=Scope.GLOBAL)
-features_dn_cfg            = Config.configure_data_node(id="features_dn",            storage_type="parquet", scope=Scope.GLOBAL)
-model_dn_cfg               = Config.configure_data_node(id="model_dn",               storage_type="pickle",  scope=Scope.GLOBAL)
-feature_importance_dn_cfg  = Config.configure_data_node(id="feature_importance_dn",  storage_type="parquet", scope=Scope.GLOBAL)
-metrics_dn_cfg             = Config.configure_data_node(id="metrics_dn",             storage_type="pickle", scope=Scope.GLOBAL)
-rec_price_dn_cfg           = Config.configure_data_node(id="rec_price_dn",           storage_type="parquet", scope=Scope.GLOBAL)
-kpi_dn_cfg                 = Config.configure_data_node(id="kpi_dn",                 storage_type="parquet", scope=Scope.GLOBAL)
+global_freight_median_dn_cfg = Config.configure_data_node(id="global_freight_median_dn", storage_type="pickle",  scope=Scope.GLOBAL)
+top_categories_dn_cfg      = Config.configure_data_node(id="top_categories_dn",          storage_type="pickle",  scope=Scope.GLOBAL)
+sku_encoder_dn_cfg         = Config.configure_data_node(id="sku_encoder_dn",             storage_type="pickle",  scope=Scope.GLOBAL)
+features_dn_cfg            = Config.configure_data_node(id="features_dn",                storage_type="parquet", scope=Scope.GLOBAL)
+model_dn_cfg               = Config.configure_data_node(id="model_dn",                   storage_type="pickle",  scope=Scope.GLOBAL)
+feature_importance_dn_cfg  = Config.configure_data_node(id="feature_importance_dn",      storage_type="parquet", scope=Scope.GLOBAL)
+metrics_dn_cfg             = Config.configure_data_node(id="metrics_dn",                 storage_type="pickle",  scope=Scope.GLOBAL)
+rec_price_dn_cfg           = Config.configure_data_node(id="rec_price_dn",               storage_type="parquet", scope=Scope.GLOBAL)
+kpi_dn_cfg                 = Config.configure_data_node(id="kpi_dn",                     storage_type="parquet", scope=Scope.GLOBAL)
 
 # in-memory intermediates
-price_grid_dn_cfg      = Config.configure_data_node(id="price_grid_dn",     storage_type="in_memory", scope=Scope.GLOBAL)
-pred_units_dn_cfg      = Config.configure_data_node(id="pred_units_dn",     storage_type="in_memory", scope=Scope.GLOBAL)
-profit_surface_dn_cfg  = Config.configure_data_node(id="profit_surface_dn", storage_type="in_memory", scope=Scope.GLOBAL)
-
-orders_df_dn_cfg        = Config.configure_data_node(id="orders_df_dn",        storage_type="in_memory", scope=Scope.GLOBAL)
-products_df_dn_cfg      = Config.configure_data_node(id="products_df_dn",      storage_type="in_memory", scope=Scope.GLOBAL)
-tagged_orders_df_dn_cfg = Config.configure_data_node(id="tagged_orders_df_dn", storage_type="in_memory", scope=Scope.GLOBAL)
-inventory_df_dn_cfg     = Config.configure_data_node(id="inventory_df_dn",     storage_type="in_memory", scope=Scope.GLOBAL)
+price_grid_dn_cfg = Config.configure_data_node(
+    id="price_grid_dn",     
+    default_data={
+        "min": 0.5,    # minimum price multiplier
+        "max": 2.0,    # maximum price multiplier
+        "n": 30        # number of price points to evaluate
+    },
+    storage_type="in_memory", 
+    scope=Scope.GLOBAL
+)
+pred_units_dn_cfg      = Config.configure_data_node(id="pred_units_dn",             storage_type="in_memory", scope=Scope.GLOBAL)
+profit_surface_dn_cfg  = Config.configure_data_node(id="profit_surface_dn",         storage_type="in_memory", scope=Scope.GLOBAL)
+orders_df_dn_cfg        = Config.configure_data_node(id="orders_df_dn",             storage_type="in_memory", scope=Scope.GLOBAL)
+products_df_dn_cfg      = Config.configure_data_node(id="products_df_dn",           storage_type="in_memory", scope=Scope.GLOBAL)
+tagged_orders_df_dn_cfg = Config.configure_data_node(id="tagged_orders_df_dn",      storage_type="in_memory", scope=Scope.GLOBAL)
+inventory_df_dn_cfg     = Config.configure_data_node(id="inventory_df_dn",          storage_type="in_memory", scope=Scope.GLOBAL)
+price_grid_results_dn_cfg = Config.configure_data_node(id="price_grid_results_dn",  storage_type="in_memory", scope=Scope.GLOBAL)
 
 # -------------------------------------------------------------------
 # 3 ▸ Parameter DataNodes (in-memory with defaults)
 # -------------------------------------------------------------------
-flash_date_dn_cfg        = Config.configure_data_node("flash_date_dn",        default_data="2017-11-24")
+flash_date_dn_cfg        = Config.configure_data_node("flash_date_dn",        default_data="2017-11-23")
 synthetic_count_dn_cfg   = Config.configure_data_node("synthetic_count_dn",   default_data=5)
 inv_method_dn_cfg        = Config.configure_data_node(
                                 id="inv_method_dn",
@@ -134,9 +143,6 @@ inv_method_dn_cfg        = Config.configure_data_node(
                                 },
                                 scope=Scope.GLOBAL          # GLOBAL so every task can read it
                             )
-price_grid_min_dn_cfg    = Config.configure_data_node("price_grid_min_dn",    default_data=0.50)
-price_grid_max_dn_cfg    = Config.configure_data_node("price_grid_max_dn",    default_data=1.20)
-price_grid_n_dn_cfg      = Config.configure_data_node("price_grid_n_dn",      default_data=30)
 unit_cost_factor_dn_cfg  = Config.configure_data_node("unit_cost_factor_dn",  default_data=0.60)
 marketing_boost_dn_cfg   = Config.configure_data_node("marketing_boost_dn",   default_data=20)
 model_type_dn_cfg        = Config.configure_data_node("model_type_dn",        default_data="xgboost")
@@ -180,7 +186,7 @@ tag_flash_window_task_cfg = Config.configure_task(
 simulate_inventory_task_cfg = Config.configure_task(
     "simulate_inventory_task",
     simulate_inventory,
-    input=[tagged_orders_df_dn_cfg, inv_method_dn_cfg],
+    input=[tagged_orders_df_dn_cfg, flash_calendar_dn_cfg, inv_method_dn_cfg],
     output=inventory_df_dn_cfg,
     skippable=True,
 )
@@ -227,17 +233,15 @@ build_price_grid_task_cfg = Config.configure_task(
     build_price_grid,
     input=[
         features_dn_cfg,
-        price_grid_min_dn_cfg,
-        price_grid_max_dn_cfg,
-        price_grid_n_dn_cfg,
+        price_grid_dn_cfg,
     ],
-    output=price_grid_dn_cfg,
+    output=price_grid_results_dn_cfg,  # Changed from price_grid_dn_cfg
 )
 
 predict_units_task_cfg = Config.configure_task(
     id="predict_units_task",
     function=predict_units,
-    input=[model_dn_cfg, price_grid_dn_cfg, features_dn_cfg],
+    input=[model_dn_cfg, price_grid_results_dn_cfg, features_dn_cfg],
     output=pred_units_dn_cfg,
 )
 
@@ -301,8 +305,8 @@ scenario_cfg.add_sequences({
     "optimize_seq": [
         build_price_grid_task_cfg,
         predict_units_task_cfg,
-        compute_profit_surface_task_cfg,
-        optimize_price_task_cfg,
+        # compute_profit_surface_task_cfg,
+        # optimize_price_task_cfg,
     ],
     "kpi_seq": [evaluate_flash_day_task_cfg],
 })
