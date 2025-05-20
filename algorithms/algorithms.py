@@ -15,6 +15,9 @@ import random
 import holidays
 from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import root_mean_squared_error
 from algorithms.inventory_policy import InventoryMethod
 from numba import njit, prange
 
@@ -463,14 +466,10 @@ def transform_features(
     df['baseline_price_30d'] = (
         df.groupby('product_id')['price']
           .transform(lambda x: x.rolling(30, min_periods=1).median().shift(1))
-          .fillna(df['price'])
     )
-    
+    df["baseline_price_30d"] = df["baseline_price_30d"].fillna(df['price'])
 
-    # Impute missing baseline prices by defaulting to the actual daily price
-    df['baseline_price_30d'] = (df['baseline_price_30d'].fillna(df['price'])['price']
-          .transform(lambda x: x.rolling(30, min_periods=1).median().shift(1))
-    )
+
     # Discount percentage
     df['discount_pct'] = 1 - df['price'] / df['baseline_price_30d']
     df['discount_pct'] = df['discount_pct'].fillna(0).clip(lower=0)
@@ -539,48 +538,78 @@ def transform_features(
 # ------------------------------------------------------------------
 # 6 ▸ Model training (regression)
 # ------------------------------------------------------------------
+
 def train_demand_model(
-    features_dn: pd.DataFrame,
-    model_type: str = "xgboost",
-    **_kwargs,
-):
+    features_df: pd.DataFrame,
+    model_type: str = "xgboost"
+) -> tuple[object, pd.DataFrame]:
     """
-    Fit a regression model predicting units_sold.
-    Returns (model, feature_importance).
+    Train a regression model to predict daily demand (units_sold).
+
+    Parameters
+    ----------
+    features_df : pd.DataFrame
+        The feature table produced by transform_features_task.
+        Must include 'date', 'demand', and all numeric predictors.
+    model_type : str
+        One of {'xgboost', 'linear'}.
+
+    Returns
+    -------
+    model : fitted regression model
+    importance_df : pd.DataFrame
+        Columns: ['feature', 'importance'] sorted by descending importance.
     """
-    df = features_dn.copy()
-    cutoff = df["date"].max() - pd.Timedelta(days=45)
-    train_df = df[df["date"] <= cutoff]
+    # 1) Prepare X, y
+    df = features_df.copy()
+    df = df.sort_values("date")
+    # drop non-feature columns
+    X = df.drop(columns=["date", "demand"])
+    y = df["demand"].values
 
-    X = train_df[[
-        "avg_price",
-        "discount_pct",
-        "baseline_price",
-        "marketing_idx",
-        "month",
-        "day_of_week",
-        "is_holiday",
-    ]]
-    y = train_df["units_sold"]
+    # 2) Temporal train/validation split (e.g. last 20% as val)
+    split_idx = int(len(df) * 0.8)
+    X_train, X_val = X.iloc[:split_idx], X.iloc[split_idx:]
+    y_train, y_val = y[:split_idx], y[split_idx:]
 
-    if model_type == "linear":
-        from sklearn.linear_model import LinearRegression
-        model = LinearRegression().fit(X, y)
-        feat_imp = pd.Series(model.coef_, index=X.columns)
-    else:
+    # 3) Fit the chosen model
+    if model_type == "xgboost":
         model = XGBRegressor(
-            n_estimators=300,
-            learning_rate=0.05,
-            max_depth=6,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            objective="reg:squarederror",
-            n_jobs=4,
-            random_state=0,
-        ).fit(X, y)
-        feat_imp = pd.Series(model.feature_importances_, index=X.columns)
+            n_estimators=1000,
+            learning_rate=0.01,
+            max_depth=20,
+            random_state=42,
+            n_jobs=-1,
+        )
+    elif model_type == "linear":
+        model = LinearRegression()
+    else:
+        raise ValueError(f"Unsupported model_type: {model_type}")
 
-    return model, feat_imp.sort_values(ascending=False)
+    model.fit(X_train, y_train)
+
+    # 4) Validation diagnostics (optional logging)
+    y_pred = model.predict(X_val)
+    rmse = root_mean_squared_error(y_val, y_pred)
+
+    # 5) Extract feature importances
+    if model_type == "xgboost":
+        importances = model.feature_importances_
+    else:  # linear
+        importances = np.abs(model.coef_)
+
+    importance_df = pd.DataFrame({
+        "feature": X.columns,
+        "importance": importances
+    }).sort_values("importance", ascending=False).reset_index(drop=True)
+
+    metrics = {
+        "rmse": rmse,
+        "train_size": len(X_train),
+        "val_size":   len(X_val),
+    }
+
+    return model, importance_df, metrics
 
 
 # ------------------------------------------------------------------

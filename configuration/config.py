@@ -100,6 +100,7 @@ sku_encoder_dn_cfg         = Config.configure_data_node(id="sku_encoder_dn",    
 features_dn_cfg            = Config.configure_data_node(id="features_dn",            storage_type="parquet", scope=Scope.GLOBAL)
 model_dn_cfg               = Config.configure_data_node(id="model_dn",               storage_type="pickle",  scope=Scope.GLOBAL)
 feature_importance_dn_cfg  = Config.configure_data_node(id="feature_importance_dn",  storage_type="parquet", scope=Scope.GLOBAL)
+metrics_dn_cfg             = Config.configure_data_node(id="metrics_dn",             storage_type="pickle", scope=Scope.GLOBAL)
 rec_price_dn_cfg           = Config.configure_data_node(id="rec_price_dn",           storage_type="parquet", scope=Scope.GLOBAL)
 kpi_dn_cfg                 = Config.configure_data_node(id="kpi_dn",                 storage_type="parquet", scope=Scope.GLOBAL)
 
@@ -217,7 +218,8 @@ train_demand_model_task_cfg = Config.configure_task(
     "train_demand_model_task",
     train_demand_model,
     input=[features_dn_cfg, model_type_dn_cfg],
-    output=[model_dn_cfg, feature_importance_dn_cfg],
+    output=[model_dn_cfg, feature_importance_dn_cfg, metrics_dn_cfg],
+    skippable=True,
 )
 
 build_price_grid_task_cfg = Config.configure_task(

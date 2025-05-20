@@ -55,6 +55,10 @@ scope = "GLOBAL:SCOPE"
 storage_type = "parquet"
 scope = "GLOBAL:SCOPE"
 
+[DATA_NODE.metrics_dn]
+storage_type = "pickle"
+scope = "GLOBAL:SCOPE"
+
 [DATA_NODE.rec_price_dn]
 storage_type = "parquet"
 scope = "GLOBAL:SCOPE"
@@ -166,8 +170,8 @@ skippable = "False:bool"
 [TASK.train_demand_model_task]
 function = "algorithms.algorithms.train_demand_model:function"
 inputs = [ "features_dn:SECTION", "model_type_dn:SECTION",]
-outputs = [ "model_dn:SECTION", "feature_importance_dn:SECTION",]
-skippable = "False:bool"
+outputs = [ "model_dn:SECTION", "feature_importance_dn:SECTION", "metrics_dn:SECTION",]
+skippable = "True:bool"
 
 [TASK.build_price_grid_task]
 function = "algorithms.algorithms.build_price_grid:function"
