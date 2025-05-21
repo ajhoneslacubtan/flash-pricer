@@ -745,22 +745,46 @@ def predict_units(
 # 9 ▸ Profit surface
 # ------------------------------------------------------------------
 def compute_profit_surface(
-    pred_units_dn: pd.DataFrame,
+    pred_units_df: pd.DataFrame,
     unit_cost_factor: float,
     objective: str = "profit",
-    **_kwargs,
 ) -> pd.DataFrame:
-    """
-    Calculate profit or revenue for every SKU × price candidate.
-    """
-    df = pred_units_dn.copy()
-    df["unit_cost"] = df["baseline_price"] * unit_cost_factor
+    """Convert predicted units to revenue/profit and objective score.
 
-    if objective == "revenue":
-        df["metric"] = df["candidate_price"] * df["pred_units"]
+    Parameters
+    ----------
+    pred_units_df : pd.DataFrame
+        Must contain ['product_id', 'price', 'predicted_units'].
+    unit_cost_factor : float
+        Cost as fraction of price (0 ≤ factor < 1).
+    objective : str, default 'profit'
+        'profit' or 'revenue' – column to optimise.
+
+    Returns
+    -------
+    pd.DataFrame with columns
+        ['product_id', 'price', 'predicted_units', 'revenue', 'profit', 'score']
+    """
+    if not 0 <= unit_cost_factor < 1:
+        raise ValueError("unit_cost_factor must be in [0, 1). Got " f"{unit_cost_factor}")
+
+    df = pred_units_df.copy()
+    # sanitize demand
+    df["predicted_units"] = df["predicted_units"].fillna(0).clip(lower=0)
+
+    df["revenue"] = df["price"] * df["predicted_units"]
+    contribution_margin = 1.0 - unit_cost_factor
+    df["profit"] = df["revenue"] * contribution_margin
+
+    if objective == "profit":
+        df["score"] = df["profit"]
+    elif objective == "revenue":
+        df["score"] = df["revenue"]
     else:
-        df["metric"] = (df["candidate_price"] - df["unit_cost"]) * df["pred_units"]
+        raise ValueError("objective must be 'profit' or 'revenue'.")
 
+    # sort for convenience
+    df = df.sort_values(["product_id", "score"], ascending=[True, False]).reset_index(drop=True)
     return df
 
 

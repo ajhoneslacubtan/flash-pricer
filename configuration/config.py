@@ -305,7 +305,7 @@ scenario_cfg.add_sequences({
     "optimize_seq": [
         build_price_grid_task_cfg,
         predict_units_task_cfg,
-        # compute_profit_surface_task_cfg,
+        compute_profit_surface_task_cfg,
         # optimize_price_task_cfg,
     ],
     "kpi_seq": [evaluate_flash_day_task_cfg],

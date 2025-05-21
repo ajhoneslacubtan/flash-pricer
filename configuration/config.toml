@@ -222,7 +222,7 @@ initial_inventory = "50:int"
 [SCENARIO.flash_pricing_scenario.sequences]
 prep_seq = [ "load_orders_task:SECTION", "load_products_task:SECTION", "generate_flash_calendar_task:SECTION", "tag_flash_window_task:SECTION", "simulate_inventory_task:SECTION", "fit_feature_artifacts_task:SECTION", "transform_features_task:SECTION",]
 train_seq = [ "train_demand_model_task:SECTION",]
-optimize_seq = [ "build_price_grid_task:SECTION", "predict_units_task:SECTION",]
+optimize_seq = [ "build_price_grid_task:SECTION", "predict_units_task:SECTION", "compute_profit_surface_task:SECTION",]
 kpi_seq = [ "evaluate_flash_day_task:SECTION",]
 
 [DATA_NODE.inv_method_dn.default_data.lead_time]
