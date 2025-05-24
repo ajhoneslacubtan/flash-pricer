@@ -1,4 +1,6 @@
 """
+algorithms/algorithms.py
+
 This file is designed to contain the various Python functions used to configure tasks.
 
 The functions will be imported by the __init__.py file in this folder.
@@ -792,102 +794,187 @@ def compute_profit_surface(
 # 10 ▸ Price optimization
 # ------------------------------------------------------------------
 def optimize_price(
-    profit_surface_dn: pd.DataFrame,
-    inventory_df_dn: pd.DataFrame,
-    **_kwargs,
+    profit_surface_df: pd.DataFrame,
+    inventory_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Select arg‑max score price for each SKU subject to stock.
+
+    Parameters
+    ----------
+    profit_surface_df : DataFrame
+        From compute_profit_surface – one row per (SKU, price).
+    inventory_df : DataFrame
+        Must include anchor‑day rows with ['product_id','on_hand'].
+
+    Returns
+    -------
+    DataFrame
+        Columns ['product_id','recommended_price','predicted_units',
+                 'on_hand','expected_revenue','expected_profit','score']
+    """
+    # Keep only anchor-day inventory rows (anchor_flag==1)
+    inv_anchor = inventory_df[inventory_df.get("anchor_flag", 1) == 1]
+    stock = inv_anchor.set_index("product_id")["on_hand"]
+
+    # Merge stock into profit surface
+    df = profit_surface_df.merge(stock, on="product_id", how="left", suffixes=("", "_stock"))
+    df["on_hand"].fillna(np.inf, inplace=True)  # if no info assume unlimited stock
+
+    # Feasible rows: units ≤ stock
+    feasible = df[df["predicted_units"] <= df["on_hand"]]
+
+    # For SKUs where no price meets stock, keep row with smallest demand
+    fallback = (
+        df.loc[df.groupby("product_id")["predicted_units"].idxmin()]
+          .assign(feasible=False)
+    )
+    feasible["feasible"] = True
+    union = pd.concat([feasible, fallback[~fallback.index.isin(feasible.index)]], ignore_index=True)
+
+    # Pick arg‑max score, tie‑break by higher price
+    union.sort_values(["product_id", "feasible", "score", "price"],
+                      ascending=[True, False, False, False], inplace=True)
+    best = union.drop_duplicates("product_id", keep="first")
+
+    out = best.rename(columns={
+        "price": "recommended_price",
+        "revenue": "expected_revenue",
+        "profit": "expected_profit",
+    })[
+        [
+            "product_id",
+            "recommended_price",
+            "predicted_units",
+            "on_hand",
+            "expected_revenue",
+            "expected_profit",
+            "score",
+        ]
+    ].reset_index(drop=True)
+
+    return out
+
+
+# ------------------------------------------------------------------------------
+# evaluate_flash_day  ─ Actual  vs  Baseline  vs  Expected
+# ------------------------------------------------------------------------------
+
+def evaluate_flash_day(
+    rec_price_df: pd.DataFrame,
+    features_df: pd.DataFrame,
+    unit_cost_factor: float,
 ) -> pd.DataFrame:
     """
-    Arg-max metric per SKU, subject to pred_units ≤ inventory.
-    Falls back to unconstrained max if none feasible.
+    Build KPI table with three reference points for the anchor flash date
+    (one row per SKU + TOTAL):
+
+        • Actual   – what really happened historically (may be zero)
+        • Baseline – model’s forecast at baseline_price_30d
+        • Expected – optimiser’s recommendation (already in rec_price_df)
+
+    Baseline KPIs do *not* need a second model run: they reuse the
+    predicted_units from rec_price_df and scale them by the price ratio.
     """
-    surface = profit_surface_dn.copy()
-    latest = inventory_df_dn["date"].max()
-    inv = (
-        inventory_df_dn[inventory_df_dn["date"] == latest]
-        .loc[:, ["product_id", "inventory"]]
+
+    if not 0 <= unit_cost_factor < 1:
+        raise ValueError("unit_cost_factor must be in [0,1).")
+
+    margin = 1.0 - unit_cost_factor
+
+    # ── 1 ▸ Anchor-day snapshot from features_df ─────────────────────────
+    anchor = (
+        features_df[features_df["anchor_flag"] == 1]
+        .sort_values(["product_id", "date"])
+        .drop_duplicates("product_id", keep="last")
+        .reset_index(drop=True)
     )
 
-    surface = surface.merge(inv, on="product_id", how="left")
-    surface["inventory"].fillna(0, inplace=True)
-    surface["feasible"] = surface["pred_units"] <= surface["inventory"]
-
-    feasible = surface[surface["feasible"]]
-    if feasible.empty:
-        # fallback: take overall max per SKU
-        idx = (
-            surface.groupby("product_id")["metric"]
-                   .idxmax()
-                   .dropna()
-                   .astype(int)
-                   .tolist()
-        )
-        rec = surface.loc[idx]
-    else:
-        idx = (
-            feasible.groupby("product_id")["metric"]
-                    .idxmax()
-                    .dropna()
-                    .astype(int)
-                    .tolist()
-        )
-        rec = feasible.loc[idx]
-
-    rec = rec.loc[:, ["product_id", "candidate_price", "pred_units", "metric"]]
-    return rec.rename(columns={
-        "candidate_price": "recommended_price",
-        "metric": "objective",
+    # Keep only columns we need
+    anchor = anchor[[
+        "product_id",
+        "price",
+        "demand",
+        "baseline_price_30d"
+    ]].rename(columns={
+        "price":   "actual_price",
+        "demand":  "actual_units",
+        "baseline_price_30d": "baseline_price"
     })
 
+    # If baseline_price is nan/<=0, fall back to actual_price
+    anchor["baseline_price"].fillna(anchor["actual_price"], inplace=True)
+    anchor.loc[anchor["baseline_price"] <= 0, "baseline_price"] = anchor["actual_price"]
 
-# ------------------------------------------------------------------
-# 11 ▸ KPI evaluation
-# ------------------------------------------------------------------
-def evaluate_flash_day(
-    rec_price_dn: pd.DataFrame,
-    features_dn: pd.DataFrame,
-    unit_cost_factor: float,
-    objective: str = "profit",
-    **_kwargs,
-) -> pd.DataFrame:
-    """
-    Compare recommended vs historical metric on flash date and report KPIs.
-    """
-    flash_date = features_dn["date"].max()
-    hist = features_dn[features_dn["date"] == flash_date].merge(
-        rec_price_dn,
-        on="product_id",
-        how="left",
-        indicator=True,
+    # ── 2 ▸ Merge optimiser output ──────────────────────────────────────
+    kpi = rec_price_df.merge(anchor, on="product_id", how="left")
+
+    # Replace NaNs for SKUs with zero historical sales
+    kpi[["actual_units"]]     = kpi[["actual_units"]].fillna(0)
+    kpi[["actual_price"]]     = kpi[["actual_price"]].fillna(kpi["recommended_price"])
+    kpi[["baseline_price"]]   = kpi[["baseline_price"]].fillna(kpi["recommended_price"])
+
+    # ── 3 ▸ Compute KPIs for each reference point ───────────────────────
+    kpi["actual_revenue"]   = kpi["actual_price"]   * kpi["actual_units"]
+    kpi["actual_profit"]    = kpi["actual_revenue"] * margin
+
+    # **Baseline**: scale predicted_units by price elasticity proxy
+    # Simple proxy: assume demand is roughly inversely proportional to price
+    price_ratio            = kpi["baseline_price"] / kpi["recommended_price"]
+    kpi["baseline_units"]  = kpi["predicted_units"] * price_ratio.clip(lower=0.2, upper=2.0)
+    kpi["baseline_revenue"] = kpi["baseline_price"] * kpi["baseline_units"]
+    kpi["baseline_profit"]  = kpi["baseline_revenue"] * margin
+
+    # ── 4 ▸ Lift metrics ────────────────────────────────────────────────
+    kpi["lift_vs_actual_rev_pct"]  = np.where(
+        kpi["actual_revenue"] > 0,
+        (kpi["expected_revenue"] - kpi["actual_revenue"]) / kpi["actual_revenue"],
+        np.nan
+    )
+    kpi["lift_vs_baseline_rev_pct"] = np.where(
+        kpi["baseline_revenue"] > 0,
+        (kpi["expected_revenue"] - kpi["baseline_revenue"]) / kpi["baseline_revenue"],
+        np.nan
+    )
+    kpi["lift_vs_actual_prof_pct"] = np.where(
+        kpi["actual_profit"] > 0,
+        (kpi["expected_profit"] - kpi["actual_profit"]) / kpi["actual_profit"],
+        np.nan
+    )
+    kpi["lift_vs_baseline_prof_pct"] = np.where(
+        kpi["baseline_profit"] > 0,
+        (kpi["expected_profit"] - kpi["baseline_profit"]) / kpi["baseline_profit"],
+        np.nan
     )
 
-    # Historical metric
-    hist["hist_metric"] = np.where(
-        objective == "revenue",
-        hist["avg_price"] * hist["units_sold"],
-        (hist["avg_price"] - hist["baseline_price"] * unit_cost_factor)
-        * hist["units_sold"],
+    # ── 5 ▸ TOTAL aggregate row ─────────────────────────────────────────
+    totals = {
+        "product_id": "_TOTAL_",
+        "recommended_price": np.nan,
+        "predicted_units":      kpi["predicted_units"].sum(),
+        "on_hand":              kpi["on_hand"].sum(),
+        "expected_revenue":     kpi["expected_revenue"].sum(),
+        "expected_profit":      kpi["expected_profit"].sum(),
+        "actual_revenue":       kpi["actual_revenue"].sum(),
+        "actual_profit":        kpi["actual_profit"].sum(),
+        "baseline_revenue":     kpi["baseline_revenue"].sum(),
+        "baseline_profit":      kpi["baseline_profit"].sum(),
+    }
+    totals["lift_vs_actual_rev_pct"]   = (
+        (totals["expected_revenue"] - totals["actual_revenue"]) /
+        totals["actual_revenue"] if totals["actual_revenue"] else np.nan
     )
-    # Recommended metric
-    hist["rec_metric"] = np.where(
-        objective == "revenue",
-        hist["recommended_price"] * hist["pred_units"],
-        (hist["recommended_price"] - hist["baseline_price"] * unit_cost_factor)
-        * hist["pred_units"],
+    totals["lift_vs_baseline_rev_pct"] = (
+        (totals["expected_revenue"] - totals["baseline_revenue"]) /
+        totals["baseline_revenue"] if totals["baseline_revenue"] else np.nan
+    )
+    totals["lift_vs_actual_prof_pct"]  = (
+        (totals["expected_profit"] - totals["actual_profit"]) /
+        totals["actual_profit"] if totals["actual_profit"] else np.nan
+    )
+    totals["lift_vs_baseline_prof_pct"] = (
+        (totals["expected_profit"] - totals["baseline_profit"]) /
+        totals["baseline_profit"] if totals["baseline_profit"] else np.nan
     )
 
-    total_hist = hist["hist_metric"].sum()
-    total_rec = hist["rec_metric"].sum()
-    lift = total_rec - total_hist
-    pct_lift = lift / total_hist if total_hist else np.nan
-    coverage = hist["_merge"].eq("both").mean()  # fraction of SKUs recommended
-
-    kpi = pd.DataFrame([{
-        "flash_date": flash_date,
-        "objective": objective,
-        "historical_total": total_hist,
-        "recommended_total": total_rec,
-        "absolute_lift": lift,
-        "percent_lift": pct_lift,
-        "coverage": coverage,
-    }])
-    return kpi
+    kpi_df = pd.concat([kpi, pd.DataFrame([totals])], ignore_index=True)
+    return kpi_df

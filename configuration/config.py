@@ -1,4 +1,6 @@
 """
+configuration/config.py
+
 Contain the application's configuration including the scenario configurations.
 
 The configuration is run when starting the Orchestrator.
@@ -262,7 +264,7 @@ optimize_price_task_cfg = Config.configure_task(
 evaluate_flash_day_task_cfg = Config.configure_task(
     id="evaluate_flash_day_task",
     function=evaluate_flash_day,
-    input=[rec_price_dn_cfg, features_dn_cfg],
+    input=[rec_price_dn_cfg, features_dn_cfg, unit_cost_factor_dn_cfg],
     output=kpi_dn_cfg,
 )
 
@@ -306,7 +308,7 @@ scenario_cfg.add_sequences({
         build_price_grid_task_cfg,
         predict_units_task_cfg,
         compute_profit_surface_task_cfg,
-        # optimize_price_task_cfg,
+        optimize_price_task_cfg,
     ],
     "kpi_seq": [evaluate_flash_day_task_cfg],
 })
